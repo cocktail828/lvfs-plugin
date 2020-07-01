@@ -12,8 +12,6 @@ install_data(['quectel.quirk'],
 shared_module('fu_plugin_quectel',
   sources : [
     'fu-plugin-quectel.c',
-    'fu-quectel-common.c',
-    'fu-quectel-device.c',
   ],
   include_directories : [
     root_incdir,

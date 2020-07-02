@@ -13,7 +13,9 @@ shared_module('fu_plugin_quectel',
   sources : [
     'fu-plugin-quectel.c',
     'fu-quectel-device.c',
+    'fu-quectel-firmware.c',
     'protocol/sahara_proto.c',
+    'protocol/firehose_proto.c',
   ],
   include_directories : [
     root_incdir,

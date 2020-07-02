@@ -9,17 +9,12 @@
 #include "../fu-quectel-device.h"
 
 #define SAHARA_MAX_PKT (8 * 1024)
-
-static gchar flash_tool_image[128];
 static uint8_t buffer[SAHARA_MAX_PKT];
-static int datalen;
+static int datalen = 0;
 static int sahara_version = 0x02;
 static int sahara_version_compatible = 0;
-static int imgfd;
-static QuectelUSBDev *usbdev;
-static int timeout;
 
-static sahara_status sahara_status_codes[] = {
+sahara_status sahara_status_codes[] = {
     {0x00, "1.0", "Success"},
     {0x01, "1.0", "Invalid command received in current state"},
     {0x02, "1.0", "Protocol mismatch between host and target"},
@@ -61,7 +56,7 @@ static sahara_status sahara_status_codes[] = {
 };
 
 // default mode, SAHARA_MODE_IMAGE_TX_COMPLETE
-static sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode)
+sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode)
 {
     sahara_hello_resp *pkt = (sahara_hello_resp *)buffer;
 
@@ -78,8 +73,9 @@ static sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode)
     return (sahara_hello_resp *)buffer;
 }
 
-static uint8_t *new_sahara_raw_data(int _offset, int _datalen)
+uint8_t *new_sahara_raw_data(int _offset, int _datalen)
 {
+    static int imgfd = 0;
     memset(buffer, 0, SAHARA_MAX_PKT);
     datalen = _datalen;
 
@@ -96,7 +92,7 @@ static uint8_t *new_sahara_raw_data(int _offset, int _datalen)
     return (uint8_t *)buffer;
 }
 
-static sahara_done *new_sahara_done(void)
+sahara_done *new_sahara_done(void)
 {
     sahara_done *pkt = (sahara_done *)buffer;
 
@@ -109,7 +105,7 @@ static sahara_done *new_sahara_done(void)
     return (sahara_done *)buffer;
 }
 
-static sahara_reset *new_sahara_reset(void)
+sahara_reset *new_sahara_reset(void)
 {
     sahara_reset *pkt = (sahara_reset *)buffer;
 
@@ -122,7 +118,7 @@ static sahara_reset *new_sahara_reset(void)
     return (sahara_reset *)buffer;
 }
 
-static sahara_switch_mode *new_sahara_switch_mode(sahara_mode mode)
+sahara_switch_mode *new_sahara_switch_mode(sahara_mode mode)
 {
     sahara_switch_mode *pkt = (sahara_switch_mode *)buffer;
 
@@ -136,7 +132,7 @@ static sahara_switch_mode *new_sahara_switch_mode(sahara_mode mode)
     return (sahara_switch_mode *)buffer;
 }
 
-static sahara_reset_machine *new_sahara_reset_machine(void)
+sahara_reset_machine *new_sahara_reset_machine(void)
 {
     sahara_reset_machine *pkt = (sahara_reset_machine *)buffer;
 
@@ -149,7 +145,7 @@ static sahara_reset_machine *new_sahara_reset_machine(void)
     return (sahara_reset_machine *)buffer;
 }
 
-static sahara_command sahara_command_type(uint8_t *data)
+sahara_command sahara_command_type(uint8_t *data)
 {
     sahara_common_header *header = (sahara_common_header *)data;
     if (!data)
@@ -157,7 +153,7 @@ static sahara_command sahara_command_type(uint8_t *data)
     return le32toh(header->command);
 }
 
-static const sahara_status *sahara_get_status_code(uint32_t status)
+const sahara_status *sahara_get_status_code(uint32_t status)
 {
     static sahara_status current_status = {
         .status = 0,
@@ -175,119 +171,16 @@ static const sahara_status *sahara_get_status_code(uint32_t status)
     return &current_status;
 }
 
-static int sahara_tx_finish(sahara_end_img_transfer *pkt)
+int sahara_tx_finish(sahara_end_img_transfer *pkt)
 {
     const sahara_status *status_code = sahara_get_status_code(le32toh(pkt->status));
-
-    close(imgfd);
-    imgfd = 0;
     return status_code->status != 0;
 }
 
-static void sahara_dump_message(uint8_t *msg, int len)
+void sahara_dump_message(uint8_t *msg, int len)
 {
     char _buffer[1024] = {'\0'};
     for (int i = 0; i < len; i++)
         snprintf(_buffer, strlen(_buffer), "%02x ", (int)msg[i]);
     LOGI("%s", _buffer);
-}
-
-static void sahara_machine_init(QuectelUSBDev *_dev)
-{
-    usbdev = _dev;
-    datalen = 0;
-    datalen = 0;
-    timeout = 5000;
-}
-
-static void sahara_machine_cleanup(void)
-{
-    if (imgfd)
-    {
-        close(imgfd);
-        imgfd = 0;
-    }
-}
-
-static int sahara_recv_cmd(void)
-{
-    memset(buffer, 0, SAHARA_MAX_PKT);
-    return fu_quectel_usb_device_recv(usbdev, buffer, array_len(buffer), timeout);
-}
-
-static int sahara_send_cmd(void)
-{
-    return fu_quectel_usb_device_send(usbdev, buffer, datalen, timeout);
-}
-
-int do_image_transfer(void *_usbdev, const char *_image)
-{
-    sahara_common_header *header = (sahara_common_header *)buffer;
-    sahara_machine_init((QuectelUSBDev*)_usbdev);
-    do
-    {
-        if (sahara_recv_cmd())
-        {
-            LOGE("sahara recv command fail");
-            return -1;
-        }
-
-        switch (sahara_command_type(buffer))
-        {
-        case SAHARA_HELLO:
-        {
-            LOGI("<- sahara_hello");
-            new_sahara_hello_resp(SAHARA_MODE_IMAGE_TX_COMPLETE);
-            if (sahara_send_cmd())
-            {
-                LOGI("sahara_send_cmd error");
-                return -1;
-            }
-            LOGI("-> sahara_hello_resp");
-            break;
-        }
-        case SAHARA_READ_DATA:
-        {
-            sahara_read_data *pkt = (sahara_read_data *)header;
-            LOGI("<- sahara_read_data offset %u len %u", le32toh(pkt->offset), le32toh(pkt->datalen));
-
-            snprintf(flash_tool_image, sizeof(flash_tool_image), "%s", _image);
-            new_sahara_raw_data(le32toh(pkt->offset), le32toh(pkt->datalen));
-            if (sahara_send_cmd())
-            {
-                LOGI("sahara_send_cmd error");
-                return -1;
-            }
-            LOGI("-> sahara_raw_data");
-            break;
-        }
-        case SAHARA_END_IMG_TRANSFER:
-        {
-            LOGI("<- sahara_end_image_transfer");
-            if (sahara_tx_finish((sahara_end_img_transfer *)header))
-            {
-                LOGI("target send SAHARA_END_IMG_TRANSFER with error");
-                return -1;
-            }
-
-            new_sahara_done();
-            if (sahara_send_cmd())
-            {
-                LOGI("sahara_send_cmd error");
-                return -1;
-            }
-            LOGI("-> sahara_done");
-            break;
-        }
-        case SAHARA_DONE_RESP:
-        {
-            LOGI("<- sahara_done_resp");
-            LOGI("image has been successfully transfered");
-            return 0;
-        }
-        default:
-            LOGI("invalid sahara command recevied");
-        }
-    } while (1);
-    return 0;
 }

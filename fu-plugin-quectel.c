@@ -12,6 +12,18 @@
 #include "fu-quectel-common.h"
 #include "fu-quectel-device.h"
 
+#define FuQuectelUSBHandle(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->usbdev)
+#define FuQuectelFirmware(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->firmware)
+#define TIMEOUT 5000
+struct FuPluginData
+{
+	GMutex mutex;
+	gint total_operation_num;
+	gint current_operation_num;
+	QuectelUSBDev *usbdev;
+	QuectelFirmware *firmware;
+};
+
 void fu_plugin_init(FuPlugin *plugin)
 {
 	fu_plugin_set_build_hash(plugin, FU_BUILD_HASH);
@@ -68,15 +80,22 @@ fu_plugin_coldplug(FuPlugin *plugin, GError **error)
 gboolean
 fu_plugin_update_attach(FuPlugin *plugin, FuDevice *device, GError **error)
 {
-	LOGI("%s", __func__);
 	return TRUE;
 }
 
+/**
+ * send EDL command, modem will switch into EDL mode(bootloader)
+ */
 gboolean
 fu_plugin_update_detach(FuPlugin *plugin, FuDevice *device, GError **error)
 {
-
-	LOGI("successfully switch info EDL mode, detach device");
+	QuectelUSBDev *usbdev = FuQuectelUSBHandle(plugin);
+	gboolean status = fu_quectel_usb_device_switch_mode(usbdev);
+	LOGI("%s switch info EDL mode", status ? "successfully" : "fail");
+	if (!status)
+		return status;
+	
+	fu_device_add_flag(device, FWUPD_STATUS_DOWNLOADING);
 	return TRUE;
 }
 
@@ -104,7 +123,24 @@ fu_plugin_update(FuPlugin *plugin,
 				 FwupdInstallFlags flags,
 				 GError **error)
 {
-	LOGI("%s", __func__);
+	QuectelUSBDev *usbdev = FuQuectelUSBHandle(plugin);
+	QuectelFirmware *fm = FuQuectelFirmware(plugin);
+
+	// first stage: transfer prog*.mbn via sahara protocol
+	gboolean status = fu_quectel_usb_device_sahara_write(usbdev, fm);
+	LOGI("%s transfer firehose flash tool", status ? "successfully" : "fail");
+	if (!status)
+		return status;
+
+	// second stage: transfer prog*.mbn via sahara protocol
+	gboolean status = fu_quectel_usb_device_firehose_write(usbdev, fm);
+	LOGI("%s transfer main programs", status ? "successfully" : "fail");
+	if (!status)
+		return status;
+
+	// third stage: reset device
+	fu_quectel_usb_device_firehose_reset(usbdev);
+	fu_device_add_flag(device, FWUPD_UPDATE_STATE_SUCCESS);
 	return TRUE;
 }
 

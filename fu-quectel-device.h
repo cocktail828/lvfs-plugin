@@ -3,6 +3,7 @@
 #include "fu-plugin.h"
 
 #include <libusb-1.0/libusb.h>
+#include "fu-quectel-firmware.h"
 
 // appstream-util generate-guid "USB\VID_2C7C"
 #define QUECTEL_COMMON_USB_GUID "22ae45db-f68e-5c55-9c02-4557dca238ec"
@@ -25,14 +26,6 @@ typedef struct
 	guint8 ep_bulk_out;
 } QuectelUSBDev;
 
-struct FuPluginData
-{
-	GMutex mutex;
-	gint total_operation_num;
-	gint current_operation_num;
-	QuectelUSBDev *usbdev;
-};
-
 typedef enum
 {
 	STATE_INVALID,
@@ -40,10 +33,18 @@ typedef enum
 	STATE_EDL,
 } modem_state;
 
+/**
+ * APIs of usbfs
+ */
+modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev);
 QuectelUSBDev *fu_quectel_find_usb_device(void);
-modem_state fu_quectel_modem_state(QuectelUSBDev *);
-gboolean fu_quectel_open_usb_device(QuectelUSBDev *);
-void fu_quectel_close_usb_device(QuectelUSBDev *);
-gboolean fu_quectel_usb_device_send(QuectelUSBDev *, guint8 *buffer, guint datalen, guint timeout);
-gboolean fu_quectel_usb_device_recv(QuectelUSBDev *, guint8 *buffer, guint datalen, guint timeout);
-gchar *fu_quectel_get_version(QuectelUSBDev *);
+gboolean fu_quectel_open_usb_device(QuectelUSBDev *usbdev);
+void fu_quectel_close_usb_device(QuectelUSBDev *usbdev);
+gboolean fu_quectel_usb_device_send(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout);
+gboolean fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout);
+gboolean fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev);
+gchar *fu_quectel_get_version(QuectelUSBDev *usbdev);
+
+gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+gboolean fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+void fu_quectel_usb_device_firehose_reset(QuectelUSBDev *usbdev);

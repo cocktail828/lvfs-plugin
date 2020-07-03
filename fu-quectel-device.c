@@ -20,7 +20,7 @@
 #include <stdlib.h>
 
 int max_bulk_rx_size = 4 * 1024;
-int max_bulk_tx_size = 16 * 1024;
+int max_bulk_tx_size = FH_TX_MAX_SIZE;
 
 static char *file_get_content(const char *fname, char *buffer, int want_read)
 {
@@ -50,262 +50,78 @@ int file_get_value(const char *fname, int base)
     return value;
 }
 
-static int fu_quectel_dm_interface_num(int vid, int pid)
+static int fu_quectel_get_dm_interface(int vid, int pid)
 {
     return 0;
 }
 
-void fu_quectel_set_endpoint_info(QuectelUSBDev *usbdev, const char *parent)
+void fu_quectel_usb_init(QuectelUSBDev *usbdev)
 {
-    char devpath[512];
-    struct dirent *entptr = NULL;
-    DIR *dirptr = NULL;
+    libusb_init(NULL);
+    memset(usbdev, 0, sizeof(QuectelUSBDev));
+}
 
-    snprintf(devpath, array_len(devpath), "%s/devpath", parent);
-    file_get_content(devpath, usbdev->devpath, array_len(usbdev->devpath));
+void fu_quectel_usb_deinit(QuectelUSBDev *usbdev)
+{
+    if (usbdev->handle)
+        libusb_close(usbdev->handle);
+}
 
-    usbdev->ifno = fu_quectel_dm_interface_num(usbdev->idVendor, usbdev->idProduct);
+bool fu_quectel_usb_arrival(struct libusb_device *dev)
+{
+    struct libusb_device_handle *handle;
+    struct libusb_device_descriptor desc;
+    int ret;
 
-    snprintf(devpath, array_len(devpath), "%s", parent);
-    dirptr = opendir(devpath);
-    if (!dirptr)
+    libusb_get_device_descriptor(dev, &desc);
+    LOGI("Add usb device: %04x:%04x", desc.idVendor, desc.idProduct);
+}
+
+bool fu_quectel_usb_left(struct libusb_device *dev)
+{
+    struct libusb_device_handle *handle;
+    struct libusb_device_descriptor desc;
+    int ret;
+
+    libusb_get_device_descriptor(dev, &desc);
+    LOGI("Remove usb device: %04x:%04x", desc.idVendor, desc.idProduct);
+}
+
+/**
+ * set endpoint info
+ */
+static void quectel_usb_set_info(QuectelUSBDev *usbdev,
+                                 struct libusb_device *dev)
+{
+    struct libusb_config_descriptor *config = NULL;
+    const struct libusb_interface *iface = NULL;
+    int ifidx = fu_quectel_get_dm_interface(usbdev->idVendor, usbdev->idProduct);
+    LINE
+        libusb_get_active_config_descriptor(dev, &config);
+    usbdev->bNumInterfaces = config->bNumInterfaces;
+
+    if (config->bNumInterfaces <= ifidx)
+    {
+        libusb_free_config_descriptor(config);
         return;
+    }
 
-    while ((entptr = readdir(dirptr)))
+    iface = &config->interface[ifidx];
+    for (int altsetting_index = 0; altsetting_index < iface->num_altsetting; altsetting_index++)
     {
-        struct dirent *subentptr = NULL;
-        DIR *subdirptr = NULL;
-
-        if (entptr->d_name[0] == '.')
-            continue;
-
-        snprintf(devpath, array_len(devpath), "%s/%s/bInterfaceNumber", parent, entptr->d_name);
-        if (usbdev->ifno != file_get_value(devpath, 10))
-            continue;
-
-        snprintf(devpath, array_len(devpath), "%s/%s", parent, entptr->d_name);
-        subdirptr = opendir(devpath);
-        if (!subdirptr)
-            break;
-        while ((subentptr = readdir(subdirptr)))
+        const struct libusb_interface_descriptor *altsetting = &iface->altsetting[altsetting_index];
+        for (int endpoint_index = 0; endpoint_index < altsetting->bNumEndpoints; endpoint_index++)
         {
-            int epaddr;
-            if (subentptr->d_name[0] == '.' || strncasecmp(subentptr->d_name, "ep_", 3))
-                continue;
+            const struct libusb_endpoint_descriptor *endpoint = &altsetting->endpoint[endpoint_index];
+            if (endpoint->bEndpointAddress & 0x80)
+                usbdev->ep_bulk_in = endpoint->bEndpointAddress;
 
-            snprintf(devpath, array_len(devpath), "%s/%s/%s/wMaxPacketSize", parent, entptr->d_name, subentptr->d_name);
-            usbdev->wMaxPacketSize = file_get_value(devpath, 10);
-
-            epaddr = strtoul(((char *)subentptr->d_name + 3), NULL, 16);
-            if (epaddr & 0x80)
-                usbdev->ep_bulk_in = epaddr;
-            else
-                usbdev->ep_bulk_out = epaddr;
-        }
-        closedir(subdirptr);
-    }
-}
-
-bool fu_quectel_scan_usb_device(QuectelUSBDev *usbdev)
-{
-    DIR *dirptr = NULL;
-    struct dirent *entptr = NULL;
-    char devpath[512];
-    bool found = false;
-
-    snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/");
-    dirptr = opendir(devpath);
-    if (!dirptr)
-    {
-        LOGE("fail to open %s", devpath);
-        return false;
-    }
-
-    while ((entptr = readdir(dirptr)))
-    {
-        int vid, pid;
-        if (entptr->d_name[0] == '.')
-            continue;
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/idVendor", entptr->d_name);
-        vid = file_get_value(devpath, 16);
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/idProduct", entptr->d_name);
-        pid = file_get_value(devpath, 16);
-
-        if (!(vid == QUECTEL_USB_NORMAL_VID ||
-              (vid == QUECTEL_USB_EDL_VID && pid == QUECTEL_USB_EDL_PID)))
-            continue;
-
-        usbdev->idVendor = vid;
-        usbdev->idProduct = pid;
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/busnum", entptr->d_name);
-        usbdev->busnum = file_get_value(devpath, 10);
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/devnum", entptr->d_name);
-        usbdev->devnum = file_get_value(devpath, 10);
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/bNumInterfaces", entptr->d_name);
-        usbdev->bNumInterfaces = file_get_value(devpath, 10);
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s", entptr->d_name);
-        fu_quectel_set_endpoint_info(usbdev, devpath);
-
-        found = true;
-        break;
-    }
-    closedir(dirptr);
-
-    snprintf(devpath, array_len(devpath), "/dev/bus/usb/%03d/%03d", usbdev->busnum, usbdev->devnum);
-    LOGI("find device %s", devpath);
-
-    LOGI("%s %x %x bus %d dev %d numif %d maxpkt %d ifno %d in %x out %x",
-         usbdev->devpath,
-         (int)usbdev->idVendor,
-         (int)usbdev->idProduct,
-         (int)usbdev->busnum,
-         (int)usbdev->devnum,
-         (int)usbdev->bNumInterfaces,
-         (int)usbdev->wMaxPacketSize,
-         (int)usbdev->ifno,
-         (int)usbdev->ep_bulk_in,
-         (int)usbdev->ep_bulk_out);
-
-    return found;
-}
-
-bool get_devpath_from_vid_pid(QuectelUSBDev *usbdev)
-{
-    DIR *dirptr = NULL;
-    struct dirent *entptr = NULL;
-    char devpath[512];
-    bool found = false;
-
-    snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/");
-    dirptr = opendir(devpath);
-    if (!dirptr)
-    {
-        LOGE("fail to open %s", devpath);
-        return false;
-    }
-
-    while ((entptr = readdir(dirptr)))
-    {
-        int busnum;
-        int devnum;
-        if (entptr->d_name[0] == '.')
-            continue;
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/busnum", entptr->d_name);
-        busnum = file_get_value(devpath, 10);
-
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/devnum", entptr->d_name);
-        devnum = file_get_value(devpath, 10);
-
-        if (usbdev->busnum == busnum && usbdev->devnum == devnum)
-        {
-            snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/devpath", entptr->d_name);
-            file_get_content(devpath, usbdev->devpath, array_len(usbdev->devpath));
-            found = true;
-            break;
+            if (!(endpoint->bEndpointAddress & 0x80))
+                usbdev->ep_bulk_out = endpoint->bEndpointAddress;
+            usbdev->wMaxPacketSize = endpoint->wMaxPacketSize;
         }
     }
-    closedir(dirptr);
-
-    LOGI("find device %s", usbdev->devpath);
-
-    return found;
-}
-
-bool get_vid_pid_from_devpath(QuectelUSBDev *usbdev)
-{
-    DIR *dirptr = NULL;
-    struct dirent *entptr = NULL;
-    char devpath[512];
-    bool found = false;
-
-    snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/");
-    dirptr = opendir(devpath);
-    if (!dirptr)
-    {
-        LOGE("fail to open %s", devpath);
-        return false;
-    }
-
-    while ((entptr = readdir(dirptr)))
-    {
-        char port[512];
-        if (entptr->d_name[0] == '.')
-            continue;
-
-        // the former devpath?
-        snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/devpath", entptr->d_name);
-        file_get_content(devpath, port, array_len(port));
-
-        if (!strncasecmp(usbdev->devpath, port, strlen(port)))
-        {
-            snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/busnum", entptr->d_name);
-            usbdev->busnum = file_get_value(devpath, 10);
-
-            snprintf(devpath, array_len(devpath), "/sys/bus/usb/devices/%s/devnum", entptr->d_name);
-            usbdev->devnum = file_get_value(devpath, 10);
-            found = true;
-            break;
-        }
-    }
-    closedir(dirptr);
-
-    snprintf(devpath, array_len(devpath), "/dev/bus/usb/%03d/%03d", usbdev->busnum, usbdev->devnum);
-    LOGI("find device %s", devpath);
-
-    return found;
-}
-
-static bool usbfs_is_kernel_driver_alive(int fd, int ifno)
-{
-    struct usbfs_driverinfo
-    {
-        unsigned int interface;
-        char driver[255 + 1];
-    };
-
-    struct usbfs_driverinfo drvinfo;
-    drvinfo.interface = ifno;
-    if (ioctl(fd, USBDEVFS_GETDRIVER, &drvinfo) < 0)
-    {
-        if (errno != ENODATA)
-            LOGE("ioctl USBDEVFS_GETDRIVER failed, for %s", strerror(errno));
-        return false;
-    }
-    LOGI("interface %d has beed occupied by the driver %s", ifno, drvinfo.driver);
-
-    return true;
-}
-
-int usbfs_detach_kernel_driver(int fd, int ifno)
-{
-    struct usbfs_ioctl
-    {
-        int ifno;       /* interface 0..N ; negative numbers reserved */
-        int ioctl_code; /* MUST encode size + direction of data so the
-			 * macros in <asm/ioctl.h> give correct values */
-        void *data;     /* param descptr (in, or out) */
-    };
-#define IOCTL_USBFS_DISCONNECT _IO('U', 22)
-#define IOCTL_USBFS_CONNECT _IO('U', 23)
-
-    struct usbfs_ioctl operate;
-    operate.data = NULL;
-    operate.ifno = ifno;
-    operate.ioctl_code = IOCTL_USBFS_DISCONNECT;
-
-    int ret = ioctl(fd, USBDEVFS_IOCTL, &operate);
-    if (ret < 0)
-        LOGE("detach kernel driver failed");
-    else
-        LOGI("detach kernel driver success");
-    return ret;
+    libusb_free_config_descriptor(config);
 }
 
 /**
@@ -313,146 +129,116 @@ int usbfs_detach_kernel_driver(int fd, int ifno)
  * most of Quectel modem (Qualcomm chipset inside) will cone up with vendor id 0x05c6 product id 0x9008 
  * if stay in upgrade mode using firehose down protocol.
  */
-modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev)
+modem_state fu_quectel_scan_usb_device(QuectelUSBDev *usbdev)
 {
-    fu_quectel_scan_usb_device(usbdev);
-    if (usbdev->idVendor == QUECTEL_USB_NORMAL_VID)
-        return STATE_NORMAL;
+    int cnt;
+    struct libusb_device **list;
+    modem_state state = STATE_INVALID;
 
-    if (usbdev->idVendor == QUECTEL_USB_EDL_VID && usbdev->idProduct == QUECTEL_USB_EDL_PID)
-        return STATE_EDL;
+    cnt = libusb_get_device_list(NULL, &list);
+    for (int i = 0; i < cnt; i++)
+    {
+        struct libusb_device_descriptor desc;
+        libusb_get_device_descriptor(list[i], &desc);
 
-    return STATE_INVALID;
+        usbdev->idVendor = desc.idVendor;
+        usbdev->idProduct = desc.idProduct;
+        quectel_usb_set_info(usbdev, list[i]);
+        if (desc.idVendor == QUECTEL_USB_NORMAL_VID)
+        {
+            state = STATE_NORMAL;
+            break;
+        }
+
+        if (desc.idVendor == QUECTEL_USB_EDL_VID && desc.idProduct == QUECTEL_USB_EDL_PID)
+        {
+            state = STATE_EDL;
+            break;
+        }
+    }
+    libusb_free_device_list(list, 1);
+
+    return state;
 }
 
 bool fu_quectel_open_usb_device(QuectelUSBDev *usbdev)
 {
-    char devpath[512];
-    int fd;
-
-    snprintf(devpath, array_len(devpath), "/dev/bus/usb/%03d/%03d", usbdev->busnum, usbdev->devnum);
-    fd = open(devpath, O_RDWR);
-    if (fd < 0)
+    int ret;
+    libusb_device_handle *handle = libusb_open_device_with_vid_pid(NULL, usbdev->idVendor, usbdev->idProduct);
+    if (!handle)
     {
-        LOGE("fail open %s for %s", devpath, strerror(errno));
+        LOGE("fail open device %04x:%04x", usbdev->idVendor, usbdev->idProduct);
         return false;
     }
-    LOGI("open %s with fd %d", devpath, fd);
 
-    if (usbfs_is_kernel_driver_alive(fd, usbdev->ifno))
-        usbfs_detach_kernel_driver(fd, usbdev->ifno);
-
-    if (ioctl(fd, USBDEVFS_CLAIMINTERFACE, &(usbdev->ifno)))
+    libusb_reset_device(handle);
+    libusb_set_auto_detach_kernel_driver(handle, true);
+    int ifidx = fu_quectel_get_dm_interface(usbdev->idVendor, usbdev->idProduct);
+    ret = libusb_claim_interface(handle, ifidx);
+    if (ret)
     {
-        LOGE("fail to claim interface %d, %s", usbdev->ifno, strerror(errno));
+        LOGE("fail claim usb %04x:%04x ifidx %d, %s", usbdev->idVendor, usbdev->idProduct, ifidx, libusb_strerror(ret));
         return false;
     }
-    usbdev->fd = fd;
+    usbdev->handle = handle;
 
     return true;
 }
 
-void fu_quectel_close_usb_device(QuectelUSBDev *usbdev)
+int fu_quectel_usb_device_send(QuectelUSBDev *usbdev, uint8_t *data, int datalen)
 {
-    close(usbdev->fd);
-    memset(usbdev, 0, sizeof(QuectelUSBDev));
-}
-
-bool fu_quectel_usb_device_send(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen)
-{
-    struct usbdevfs_urb bulk;
-    struct usbdevfs_urb *urb = &bulk;
-    int n = -1;
-
-    memset(urb, 0, sizeof(struct usbdevfs_urb));
-    urb->type = USBDEVFS_URB_TYPE_BULK;
-    urb->endpoint = usbdev->ep_bulk_out;
-
-    urb->status = -1;
-    urb->buffer = (void *)buffer;
-    urb->buffer_length = (datalen > max_bulk_tx_size) ? max_bulk_tx_size : datalen;
-    urb->usercontext = urb;
-    urb->flags = 0;
-
-    //         if ((datalen <= max_bulk_size) && need_zlp && (len % udev->wMaxPacketSize[bInterfaceNumber]) == 0)
-    //         {
-    // #ifndef USBDEVFS_URB_ZERO_PACKET
-    // #define USBDEVFS_URB_ZERO_PACKET 0x40
-    // #endif
-    //             urb->flags = USBDEVFS_URB_ZERO_PACKET;
-    //         }
-    //         else
+    int transfered = 0;
 
     do
     {
-        n = ioctl(usbdev->fd, USBDEVFS_SUBMITURB, urb);
-    } while ((n < 0) && (errno == EINTR));
-
-    if (n != 0)
-    {
-        LOGE("ioctl USBDEVFS_SUBMITURB ret=%d, %s", n, strerror(errno));
-        return false;
-    }
-
-    do
-    {
-        urb = NULL;
-        n = ioctl(usbdev->fd, USBDEVFS_REAPURB, &urb);
-    } while ((n < 0) && (errno == EINTR));
-
-    if (n != 0)
-    {
-        LOGE("ioctl USBDEVFS_REAPURB ret=%d %s", n, strerror(errno));
-    }
-
-    //LOGE<<"[ urb @%p status = %d, actual = %d ]\n", urb, urb->status, urb->actual_length);
-
-    if (urb && urb->status == 0 && urb->actual_length)
-        return urb->actual_length;
-
-    return false;
-}
-
-bool fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen)
-{
-    struct usbdevfs_bulktransfer bulk;
-    int n = -1;
-
-    bulk.ep = usbdev->ep_bulk_in;
-    bulk.len = (datalen > max_bulk_rx_size) ? max_bulk_rx_size : datalen;
-    bulk.data = (void *)buffer;
-    bulk.timeout = TIMEOUT;
-
-    n = ioctl(usbdev->fd, USBDEVFS_BULK, &bulk);
-    if (n <= 0)
-    {
-        if (errno == ETIMEDOUT)
+        int actlen;
+        int tx_size = (datalen > max_bulk_tx_size) ? max_bulk_tx_size : datalen;
+        int ret = libusb_bulk_transfer(usbdev->handle, usbdev->ep_bulk_out, data, tx_size, &actlen, TIMEOUT);
+        if (!ret && actlen == tx_size)
         {
-            LOGE("usb bulk in timeout");
-            n = 0;
+            transfered += actlen;
+            datalen -= tx_size;
         }
         else
-            LOGE("usb bulk in error, for %s", strerror(errno));
-    }
+        {
+            LOGE("bulk tx error (%d/%d/%d), %s", actlen, tx_size, transfered, libusb_strerror(ret));
+            break;
+        }
 
-    return (n == datalen);
+        if (datalen == 0)
+            break;
+    } while (1);
+
+    return transfered;
+}
+
+int fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, uint8_t *data, int datalen)
+{
+    int actlen;
+    int ret = libusb_bulk_transfer(usbdev->handle, usbdev->ep_bulk_in, data, datalen, &actlen, TIMEOUT);
+    if (ret)
+        LOGE("bulk rx error, rx=%d", actlen);
+
+    return actlen;
 }
 
 bool fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev)
 {
     int max_try = 5;
     uint8_t edl_command[] = {0x4b, 0x65, 0x01, 0x00, 0x54, 0x0f, 0x7e};
+    modem_state state = fu_quectel_scan_usb_device(usbdev);
 
-    while (fu_quectel_modem_state(usbdev) != STATE_EDL)
+    while (state != STATE_EDL && max_try)
     {
         fu_quectel_usb_device_send(usbdev, edl_command, array_len(edl_command));
         usleep(3);
         max_try--;
         if (!max_try)
             break;
+        state = fu_quectel_scan_usb_device(usbdev);
     }
 
-    return (fu_quectel_modem_state(usbdev) == STATE_EDL);
+    return (state == STATE_EDL);
 }
 
 char *fu_quectel_get_version(QuectelUSBDev *usbdev)
@@ -558,13 +344,13 @@ static bool
 fu_quectel_send_raw_data(QuectelUSBDev *usbdev, const char *img, int sector_size)
 {
     bool status;
-    uint8_t buffer[FH_TX_MAX];
+    uint8_t buffer[FH_TX_MAX_SIZE];
     int imgfd = open(img, O_RDONLY);
     int remain_len = get_file_size(imgfd);
 
     do
     {
-        int tx_size = (remain_len > FH_TX_MAX) ? FH_TX_MAX : sector_size;
+        int tx_size = (remain_len > FH_TX_MAX_SIZE) ? FH_TX_MAX_SIZE : sector_size;
         memset(buffer, 0, array_len(buffer));
         read(imgfd, buffer, tx_size);
         status = fu_quectel_usb_device_send(usbdev, buffer, tx_size);
@@ -618,12 +404,4 @@ void fu_quectel_usb_device_firehose_reset(QuectelUSBDev *usbdev)
 {
     char *cmd = new_firehose_power("reset");
     fu_quectel_usb_device_send(usbdev, (uint8_t *)cmd, strlen(cmd));
-}
-
-int main()
-{
-    QuectelUSBDev usbdev;
-    fu_quectel_scan_usb_device(&usbdev);
-
-    fu_quectel_open_usb_device(&usbdev);
 }

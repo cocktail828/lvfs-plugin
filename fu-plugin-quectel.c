@@ -12,9 +12,6 @@
 #include "fu-quectel-common.h"
 #include "fu-quectel-device.h"
 
-#define FuQuectelUSBHandle(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->usbdev)
-#define FuQuectelFirmware(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->firmware)
-
 struct FuPluginData
 {
 	GMutex mutex;
@@ -38,23 +35,15 @@ void fu_plugin_destroy(FuPlugin *plugin)
 		g_free(data);
 }
 
-gboolean
-fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
+bool fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
 {
-	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
+	FuPluginData *data = fu_plugin_get_data(plugin);
+	QuectelUSBDev *usbdev = &data->usbdev;
 
-	if (fu_quectel_scan_usb_device(usbdev))
-	{
-		if (!fu_quectel_open_usb_device(usbdev))
-		{
-			return FALSE;
-		}
-	}
+	if (fu_quectel_scan_usb_device(usbdev) == STATE_INVALID)
+		return false;
 
-	if (!usbdev)
-		return FALSE;
-
-	g_autofree gchar *vendor_id = g_strdup_printf("USB:%04x:%04x", usbdev->idVendor, usbdev->idProduct);
+	g_autofree gchar *vendor_id = g_strdup_printf("USB:VID_%04x&PID_%04x", usbdev->idVendor, usbdev->idProduct);
 	g_autofree gchar *device_id = g_strdup_printf("%s-%s", fu_plugin_get_name(plugin), usbdev->devpath);
 
 	fu_device_set_id(device, device_id);
@@ -78,35 +67,17 @@ fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
 gboolean
 fu_plugin_coldplug(FuPlugin *plugin, GError **error)
 {
-	gboolean status;
+	bool status;
+	FuPluginData *data = fu_plugin_get_data(plugin);
+	QuectelUSBDev *usbdev = &data->usbdev;
 	g_autoptr(FuDevice) device = NULL;
+
 	device = fu_device_new();
+	fu_quectel_usb_init(usbdev);
 	status = fu_quectel_set_info(plugin, device);
 	fu_plugin_device_add(plugin, device);
 
 	return status;
-}
-
-gboolean
-fu_plugin_update_attach(FuPlugin *plugin, FuDevice *device, GError **error)
-{
-	return fu_quectel_set_info(plugin, device);
-}
-
-/**
- * send EDL command, modem will switch into EDL mode(bootloader)
- */
-gboolean
-fu_plugin_update_detach(FuPlugin *plugin, FuDevice *device, GError **error)
-{
-	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
-	gboolean status = fu_quectel_usb_device_switch_mode(usbdev);
-	LOGI("%s switch into EDL mode", status ? "successfully" : "fail");
-	if (!status)
-		return status;
-
-	fu_device_add_flag(device, FWUPD_STATUS_DOWNLOADING);
-	return TRUE;
 }
 
 void fu_plugin_device_registered(FuPlugin *plugin, FuDevice *device)
@@ -133,9 +104,18 @@ fu_plugin_update(FuPlugin *plugin,
 				 FwupdInstallFlags flags,
 				 GError **error)
 {
-	gboolean status;
-	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
-	QuectelFirmware *fm = FuQuectelFirmware(plugin);
+	bool status;
+	FuPluginData *data = fu_plugin_get_data(plugin);
+	QuectelUSBDev *usbdev = &data->usbdev;
+	QuectelFirmware *fm = data->firmware;
+
+	if (!fu_quectel_open_usb_device(usbdev))
+		return FALSE;
+
+	status = fu_quectel_usb_device_switch_mode(usbdev);
+	LOGI("%s switch into EDL mode", status ? "successfully" : "fail");
+	if (!status)
+		return status;
 
 	// first stage: transfer prog*.mbn via sahara protocol
 	status = fu_quectel_usb_device_sahara_write(usbdev, fm);

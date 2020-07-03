@@ -4,6 +4,7 @@
 #include "fu-quectel-firmware.h"
 
 #include <stdint.h>
+#include <libusb-1.0/libusb.h>
 
 // appstream-util generate-guid "USB\VID_2C7C"
 #define QUECTEL_COMMON_USB_GUID "22ae45db-f68e-5c55-9c02-4557dca238ec"
@@ -16,15 +17,13 @@
 typedef struct
 {
 	char devpath[32];
-	int fd;
+	void *handle;
 	uint16_t idVendor;
 	uint16_t idProduct;
-	uint8_t busnum;
-	uint8_t devnum;
 
 	uint8_t bNumInterfaces;
 	uint16_t wMaxPacketSize;
-	uint8_t ifno;
+	uint8_t ifidx;
 	uint8_t ep_bulk_in;
 	uint8_t ep_bulk_out;
 } QuectelUSBDev;
@@ -37,11 +36,11 @@ typedef enum
 } modem_state;
 
 #define TIMEOUT 5000
-#define FH_TX_MAX (16 * 1024)
-/**
- * APIs of usbfs
- */
-modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev);
+#define FH_TX_MAX_SIZE (16 * 1024)
+
+void fu_quectel_usb_init(QuectelUSBDev *usbdev);
+
+void fu_quectel_usb_deinit(QuectelUSBDev *usbdev);
 
 /**
  * try to find device; notice, there should be only one quectel device
@@ -51,15 +50,26 @@ modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev);
  *  pci:
  *      todo in the fulture
  */
-bool fu_quectel_scan_usb_device(QuectelUSBDev *usbdev);
+modem_state fu_quectel_scan_usb_device(QuectelUSBDev *usbdev);
 
 bool fu_quectel_open_usb_device(QuectelUSBDev *usbdev);
 void fu_quectel_close_usb_device(QuectelUSBDev *usbdev);
-bool fu_quectel_usb_device_send(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen);
-bool fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen);
+int fu_quectel_usb_device_send(QuectelUSBDev *usbdev, uint8_t *data, int datalen);
+int fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, uint8_t *data, int datalen);
 bool fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev);
 char *fu_quectel_get_version(QuectelUSBDev *usbdev);
 
+/**
+ * transfer prog_nand.mbn(firehose flash tool) into modem
+ */
 bool fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, const char *prog);
+
+/**
+ * do operations via firehose protocol
+ */
 bool fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+
+/**
+ * do reset via firehose protocol
+ */
 void fu_quectel_usb_device_firehose_reset(QuectelUSBDev *usbdev);

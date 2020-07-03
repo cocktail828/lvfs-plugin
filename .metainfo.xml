@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2018 Richard Hughes <richard@hughsie.com> -->
+<component type="firmware">
+	<id>
+		Quectel
+	</id>
+	<name>
+		Quectel
+	</name>
+	<name_variant_suffix>
+		Black Friday Special Edition
+	</name_variant_suffix>
+	<summary>
+		Firmware for the Quectel Wireless Modems
+	</summary>
+	<description>
+		<p>
+			Updating the firmware on your quectel device improves performance and adds new features.
+		</p>
+	</description>
+	<provides>
+		<firmware type="flashed">
+			587bf468-6859-5522-93a7-6cce552a0aa3
+		</firmware>
+	</provides>
+	<url type="homepage">
+		http://www.quectel.com/
+	</url>
+	<metadata_license>
+		CC0-1.0
+	</metadata_license>
+	<project_license>
+		MIT
+	</project_license>
+	<developer_name>
+		Quectel Wireless Limited
+	</developer_name>
+	<releases>
+		<release urgency="high" version="EC20CEFA01V02" date="2017-02-09" install_duration="120">
+			<checksum filename="rawprogram_nand_p4K_b256K_update.xml" target="content" />
+			<description>
+				<p>
+					This stable release fixes the following bugs:
+				</p>
+				<ul>
+					<li>
+						Fix the return code from GetHardwareVersion
+					</li>
+					<li>
+						Scale the output of TakeReadingRaw by the datasheet values
+					</li>
+				</ul>
+			</description>
+			<issues>
+				<issue type="lenovo">
+					LEN-28775
+				</issue>
+			</issues>
+		</release>
+	</releases>
+	<!--
+	we can optionally restrict this update to specific fwupd versions,
+	or even previous firmware or bootloader versions
+	-->
+	<requires>
+		<id compare="ge" version="0.8.0">
+			org.freedesktop.fwupd
+		</id>
+		<firmware compare="ge" version="0.1.1">
+			bootloader
+		</firmware>
+	</requires>
+	<!-- these keywords are optional and are used for searching -->
+	<keywords>
+		<keyword>
+			modem
+		</keyword>
+		<keyword>
+			quectel
+		</keyword>
+	</keywords>
+</component>

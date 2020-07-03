@@ -1,11 +1,11 @@
 #pragma once
-#include <syslog.h>
 
-#define LOG_PREFIX "plugin-quectel "
-#define LOGD(fmt, args...) syslog(LOG_USER | LOG_DEBUG, LOG_PREFIX fmt, ##args);
-#define LOGI(fmt, args...) syslog(LOG_USER | LOG_INFO, LOG_PREFIX fmt, ##args);
-#define LOGW(fmt, args...) syslog(LOG_USER | LOG_WARNING, LOG_PREFIX fmt, ##args);
-#define LOGE(fmt, args...) syslog(LOG_USER | LOG_ERR, LOG_PREFIX fmt, ##args);
+#include <stdio.h>
+#define LOG_PREFIX ""
+#define LOGD(fmt, args...) printf(LOG_PREFIX "%s_%d " fmt "\n", __FILE__, __LINE__, ##args)
+#define LOGI(fmt, args...) printf(LOG_PREFIX "%s_%d " fmt "\n", __FILE__, __LINE__, ##args)
+#define LOGW(fmt, args...) printf(LOG_PREFIX "%s_%d " fmt "\n", __FILE__, __LINE__, ##args)
+#define LOGE(fmt, args...) printf(LOG_PREFIX "%s_%d " fmt "\n", __FILE__, __LINE__, ##args)
 
 #define LINE LOGI("%s %d", __func__, __LINE__);
 

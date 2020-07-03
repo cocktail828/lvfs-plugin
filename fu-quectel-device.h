@@ -1,9 +1,9 @@
 #pragma once
 
-#include "fu-plugin.h"
-
-#include <libusb-1.0/libusb.h>
+// #include "fu-plugin.h"
 #include "fu-quectel-firmware.h"
+
+#include <stdint.h>
 
 // appstream-util generate-guid "USB\VID_2C7C"
 #define QUECTEL_COMMON_USB_GUID "22ae45db-f68e-5c55-9c02-4557dca238ec"
@@ -15,15 +15,18 @@
 
 typedef struct
 {
-	gchar *devpath;
-	struct libusb_device_handle *handle;
-	guint16 idVendor;
-	guint16 idProduct;
-	guint8 bNumInterfaces;
-	gint16 wMaxPacketSize;
-	guint8 ifno;
-	guint8 ep_bulk_in;
-	guint8 ep_bulk_out;
+	char devpath[32];
+	int fd;
+	uint16_t idVendor;
+	uint16_t idProduct;
+	uint8_t busnum;
+	uint8_t devnum;
+
+	uint8_t bNumInterfaces;
+	uint16_t wMaxPacketSize;
+	uint8_t ifno;
+	uint8_t ep_bulk_in;
+	uint8_t ep_bulk_out;
 } QuectelUSBDev;
 
 typedef enum
@@ -39,14 +42,24 @@ typedef enum
  * APIs of usbfs
  */
 modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev);
-QuectelUSBDev *fu_quectel_find_usb_device(void);
-gboolean fu_quectel_open_usb_device(QuectelUSBDev *usbdev);
-void fu_quectel_close_usb_device(QuectelUSBDev *usbdev);
-gboolean fu_quectel_usb_device_send(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout);
-gboolean fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout);
-gboolean fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev);
-gchar *fu_quectel_get_version(QuectelUSBDev *usbdev);
 
-gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, const gchar *prog);
-gboolean fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+/**
+ * try to find device; notice, there should be only one quectel device
+ *  usb:
+ *      nornal mode 2c7c
+ *      edl mode 05c6:9008
+ *  pci:
+ *      todo in the fulture
+ */
+bool fu_quectel_scan_usb_device(QuectelUSBDev *usbdev);
+
+bool fu_quectel_open_usb_device(QuectelUSBDev *usbdev);
+void fu_quectel_close_usb_device(QuectelUSBDev *usbdev);
+bool fu_quectel_usb_device_send(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen);
+bool fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, uint8_t *buffer, int datalen);
+bool fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev);
+char *fu_quectel_get_version(QuectelUSBDev *usbdev);
+
+bool fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, const char *prog);
+bool fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
 void fu_quectel_usb_device_firehose_reset(QuectelUSBDev *usbdev);

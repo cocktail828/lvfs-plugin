@@ -1,6 +1,11 @@
 #pragma once
 
-#include "fu-plugin.h"
+#include <stdint.h>
+#include <errno.h>
+
+typedef uint8_t bool;
+#define true 1
+#define false 0
 
 typedef enum
 {
@@ -12,15 +17,15 @@ typedef enum
 typedef struct
 {
 	command_type type;
-	gchar *hash;
-	gchar *data;
-	gchar *img;
-	guint sector_size;
+	char *hash;
+	char *data;
+	char *img;
+	int sector_size;
 } QuectelFirmware;
 
 /**
  * APIs of firmware
  */
-QuectelFirmware *fu_quectel_firmware_parser(const gchar *xml);
-gboolean fu_quectel_firmware_varify(QuectelFirmware *fm);
+QuectelFirmware *fu_quectel_firmware_parser(const char *xml);
+bool fu_quectel_firmware_varify(QuectelFirmware *fm);
 void fu_quectel_firmware_cleanup(QuectelFirmware *fm);

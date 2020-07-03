@@ -20,7 +20,7 @@ struct FuPluginData
 	GMutex mutex;
 	gint total_operation_num;
 	gint current_operation_num;
-	QuectelUSBDev *usbdev;
+	QuectelUSBDev usbdev;
 	QuectelFirmware *firmware;
 };
 
@@ -34,9 +34,6 @@ void fu_plugin_init(FuPlugin *plugin)
 void fu_plugin_destroy(FuPlugin *plugin)
 {
 	FuPluginData *data = fu_plugin_get_data(plugin);
-	if (data && data->usbdev)
-		free(data->usbdev);
-
 	if (data)
 		g_free(data);
 }
@@ -44,9 +41,15 @@ void fu_plugin_destroy(FuPlugin *plugin)
 gboolean
 fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
 {
-	FuPluginData *data = fu_plugin_get_data(plugin);
-	QuectelUSBDev *usbdev = fu_quectel_find_usb_device();
-	data->usbdev = usbdev;
+	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
+
+	if (fu_quectel_scan_usb_device(usbdev))
+	{
+		if (!fu_quectel_open_usb_device(usbdev))
+		{
+			return FALSE;
+		}
+	}
 
 	if (!usbdev)
 		return FALSE;
@@ -65,7 +68,7 @@ fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
 	fu_device_add_flag(device, FWUPD_DEVICE_FLAG_CAN_VERIFY);
 	fu_device_set_vendor(device, "Quectel.");
 	fu_device_set_vendor_id(device, vendor_id);
-	fu_device_set_version_bootloader(device, "0.1.2");
+	fu_device_set_version_bootloader(device, "2.0.0");
 	fu_device_set_version(device, "1.2.2", FWUPD_VERSION_FORMAT_PLAIN);
 	fu_device_set_version_lowest(device, "1.2.0");
 
@@ -96,9 +99,9 @@ fu_plugin_update_attach(FuPlugin *plugin, FuDevice *device, GError **error)
 gboolean
 fu_plugin_update_detach(FuPlugin *plugin, FuDevice *device, GError **error)
 {
-	QuectelUSBDev *usbdev = FuQuectelUSBHandle(plugin);
+	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
 	gboolean status = fu_quectel_usb_device_switch_mode(usbdev);
-	LOGI("%s switch info EDL mode", status ? "successfully" : "fail");
+	LOGI("%s switch into EDL mode", status ? "successfully" : "fail");
 	if (!status)
 		return status;
 
@@ -131,7 +134,7 @@ fu_plugin_update(FuPlugin *plugin,
 				 GError **error)
 {
 	gboolean status;
-	QuectelUSBDev *usbdev = FuQuectelUSBHandle(plugin);
+	QuectelUSBDev *usbdev = &FuQuectelUSBHandle(plugin);
 	QuectelFirmware *fm = FuQuectelFirmware(plugin);
 
 	// first stage: transfer prog*.mbn via sahara protocol

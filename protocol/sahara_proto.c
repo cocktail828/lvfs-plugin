@@ -1,5 +1,7 @@
-
 #include <endian.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <stdio.h>
 
 #include "sahara_proto.h"
 #include "../fu-quectel-common.h"
@@ -70,7 +72,8 @@ sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode)
 }
 
 uint8_t *new_sahara_raw_data(int imgfd, int _offset, int _datalen)
-{memset(buffer, 0, SAHARA_MAX_PKT);
+{
+    memset(buffer, 0, SAHARA_MAX_PKT);
     datalen = _datalen;
 
     lseek(imgfd, _offset, SEEK_SET);
@@ -152,7 +155,7 @@ const sahara_status *sahara_get_status_code(uint32_t status)
         .description = "sahara unknow error",
     };
 
-    for (guint i = 0; i < array_len(sahara_status_codes); i++)
+    for (uint32_t i = 0; i < array_len(sahara_status_codes); i++)
     {
         if (sahara_status_codes[i].status == status)
             return &sahara_status_codes[i];
@@ -172,6 +175,6 @@ void sahara_dump_message(uint8_t *msg, int len)
 {
     char _buffer[1024] = {'\0'};
     for (int i = 0; i < len; i++)
-        snprintf(_buffer, strlen(_buffer), "%02x ", (int)msg[i]);
+        snprintf(_buffer, (char *)_buffer + strlen(_buffer), "%02x ", (int)msg[i]);
     LOGI("%s", _buffer);
 }

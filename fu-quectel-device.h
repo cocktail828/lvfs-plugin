@@ -33,6 +33,8 @@ typedef enum
 	STATE_EDL,
 } modem_state;
 
+#define TIMEOUT 5000
+#define FH_TX_MAX (16 * 1024)
 /**
  * APIs of usbfs
  */
@@ -45,6 +47,6 @@ gboolean fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, guint8 *buffer, guint
 gboolean fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev);
 gchar *fu_quectel_get_version(QuectelUSBDev *usbdev);
 
-gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, const gchar *prog);
 gboolean fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
 void fu_quectel_usb_device_firehose_reset(QuectelUSBDev *usbdev);

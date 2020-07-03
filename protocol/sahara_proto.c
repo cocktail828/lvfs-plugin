@@ -1,14 +1,10 @@
 
 #include <endian.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
 
 #include "sahara_proto.h"
 #include "../fu-quectel-common.h"
 #include "../fu-quectel-device.h"
 
-#define SAHARA_MAX_PKT (8 * 1024)
 static uint8_t buffer[SAHARA_MAX_PKT];
 static int datalen = 0;
 static int sahara_version = 0x02;
@@ -73,14 +69,9 @@ sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode)
     return (sahara_hello_resp *)buffer;
 }
 
-uint8_t *new_sahara_raw_data(int _offset, int _datalen)
-{
-    static int imgfd = 0;
-    memset(buffer, 0, SAHARA_MAX_PKT);
+uint8_t *new_sahara_raw_data(int imgfd, int _offset, int _datalen)
+{memset(buffer, 0, SAHARA_MAX_PKT);
     datalen = _datalen;
-
-    if (!imgfd)
-        imgfd = open(flash_tool_image, O_RDONLY);
 
     lseek(imgfd, _offset, SEEK_SET);
     if (read(imgfd, buffer, _datalen) < 0)

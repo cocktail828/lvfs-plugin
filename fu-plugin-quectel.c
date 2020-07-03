@@ -14,7 +14,7 @@
 
 #define FuQuectelUSBHandle(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->usbdev)
 #define FuQuectelFirmware(fu) (((struct FuPluginData *)fu_plugin_get_data(fu))->firmware)
-#define TIMEOUT 5000
+
 struct FuPluginData
 {
 	GMutex mutex;
@@ -42,20 +42,17 @@ void fu_plugin_destroy(FuPlugin *plugin)
 }
 
 gboolean
-fu_plugin_coldplug(FuPlugin *plugin, GError **error)
+fu_quectel_set_info(FuPlugin *plugin, FuDevice *device)
 {
-	g_autoptr(FuDevice) device = NULL;
 	FuPluginData *data = fu_plugin_get_data(plugin);
-	g_autofree gchar *vendor_id = NULL;
-	g_autofree gchar *device_id = NULL;
-
 	QuectelUSBDev *usbdev = fu_quectel_find_usb_device();
+	data->usbdev = usbdev;
+
 	if (!usbdev)
 		return FALSE;
 
-	device = fu_device_new();
-	vendor_id = g_strdup_printf("USB:%04x:%04x", usbdev->idVendor, usbdev->idProduct);
-	device_id = g_strdup_printf("%s-%s", fu_plugin_get_name(plugin), usbdev->devpath);
+	g_autofree gchar *vendor_id = g_strdup_printf("USB:%04x:%04x", usbdev->idVendor, usbdev->idProduct);
+	g_autofree gchar *device_id = g_strdup_printf("%s-%s", fu_plugin_get_name(plugin), usbdev->devpath);
 
 	fu_device_set_id(device, device_id);
 	fu_device_add_parent_guid(device, QUECTEL_COMMON_USB_GUID);
@@ -71,16 +68,26 @@ fu_plugin_coldplug(FuPlugin *plugin, GError **error)
 	fu_device_set_version_bootloader(device, "0.1.2");
 	fu_device_set_version(device, "1.2.2", FWUPD_VERSION_FORMAT_PLAIN);
 	fu_device_set_version_lowest(device, "1.2.0");
+
+	return TRUE;
+}
+
+gboolean
+fu_plugin_coldplug(FuPlugin *plugin, GError **error)
+{
+	gboolean status;
+	g_autoptr(FuDevice) device = NULL;
+	device = fu_device_new();
+	status = fu_quectel_set_info(plugin, device);
 	fu_plugin_device_add(plugin, device);
 
-	data->usbdev = usbdev;
-	return TRUE;
+	return status;
 }
 
 gboolean
 fu_plugin_update_attach(FuPlugin *plugin, FuDevice *device, GError **error)
 {
-	return TRUE;
+	return fu_quectel_set_info(plugin, device);
 }
 
 /**
@@ -94,7 +101,7 @@ fu_plugin_update_detach(FuPlugin *plugin, FuDevice *device, GError **error)
 	LOGI("%s switch info EDL mode", status ? "successfully" : "fail");
 	if (!status)
 		return status;
-	
+
 	fu_device_add_flag(device, FWUPD_STATUS_DOWNLOADING);
 	return TRUE;
 }
@@ -123,17 +130,18 @@ fu_plugin_update(FuPlugin *plugin,
 				 FwupdInstallFlags flags,
 				 GError **error)
 {
+	gboolean status;
 	QuectelUSBDev *usbdev = FuQuectelUSBHandle(plugin);
 	QuectelFirmware *fm = FuQuectelFirmware(plugin);
 
 	// first stage: transfer prog*.mbn via sahara protocol
-	gboolean status = fu_quectel_usb_device_sahara_write(usbdev, fm);
+	status = fu_quectel_usb_device_sahara_write(usbdev, fm);
 	LOGI("%s transfer firehose flash tool", status ? "successfully" : "fail");
 	if (!status)
 		return status;
 
 	// second stage: transfer prog*.mbn via sahara protocol
-	gboolean status = fu_quectel_usb_device_firehose_write(usbdev, fm);
+	status = fu_quectel_usb_device_firehose_write(usbdev, fm);
 	LOGI("%s transfer main programs", status ? "successfully" : "fail");
 	if (!status)
 		return status;

@@ -2,6 +2,9 @@
 #include "fu-quectel-device.h"
 
 #include "protocol/sahara_proto.h"
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 static guint fu_quectel_dm_interface_num(guint16 vid, guint16 pid)
 {
@@ -115,6 +118,7 @@ error:
  */
 modem_state fu_quectel_modem_state(QuectelUSBDev *usbdev)
 {
+    fu_quectel_find_usb_device();
     if (usbdev->idVendor == QUECTEL_USB_NORMAL_VID)
         return STATE_NORMAL;
 
@@ -145,14 +149,31 @@ void fu_quectel_close_usb_device(QuectelUSBDev *usbdev)
     libusb_close(usbdev->handle);
 }
 
-gboolean fu_quectel_usb_device_send(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout)
+gboolean
+fu_quectel_usb_device_send(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout)
 {
     return TRUE;
 }
 
-gboolean fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout)
+gboolean
+fu_quectel_usb_device_recv(QuectelUSBDev *usbdev, guint8 *buffer, guint datalen, guint timeout)
 {
     return TRUE;
+}
+
+gboolean
+fu_quectel_usb_device_switch_mode(QuectelUSBDev *usbdev)
+{
+    guint max_try = 5;
+    guint8 edl_command[] = {0x4b, 0x65, 0x01, 0x00, 0x54, 0x0f, 0x7e};
+
+    while (fu_quectel_modem_state(usbdev) != STATE_EDL)
+    {
+        fu_quectel_usb_device_send(usbdev, edl_command, array_len(edl_command), TIMEOUT);
+        usleep(3);
+    }
+
+    return (fu_quectel_modem_state(usbdev) == STATE_EDL);
 }
 
 gchar *fu_quectel_get_version(QuectelUSBDev *usbdev)
@@ -160,16 +181,21 @@ gchar *fu_quectel_get_version(QuectelUSBDev *usbdev)
     return "1.2.0";
 }
 
-gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+gboolean
+fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, const gchar *prog)
 {
+    gboolean status;
     guint8 buffer[SAHARA_MAX_PKT]; // recv buffer
-    sahara_common_header *header = (sahara_common_header *)buffer;
+    int imgfd;
+
+    imgfd = open(prog, O_RDONLY);
     do
     {
         if (fu_quectel_usb_device_recv(usbdev, buffer, array_len(buffer), TIMEOUT))
         {
             LOGE("sahara recv command fail");
-            return -1;
+            status = FALSE;
+            goto quit;
         }
 
         switch (sahara_command_type(buffer))
@@ -177,26 +203,29 @@ gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmwa
         case SAHARA_HELLO:
         {
             LOGI("<- sahara_hello");
-            new_sahara_hello_resp(SAHARA_MODE_IMAGE_TX_COMPLETE);
-            if (fu_quectel_usb_device_send())
+            if (fu_quectel_usb_device_send(usbdev,
+                                           new_sahara_hello_resp(SAHARA_MODE_IMAGE_TX_COMPLETE),
+                                           sizeof(sahara_hello_resp), TIMEOUT))
             {
                 LOGE("sahara hello response error");
-                return -1;
+                status = FALSE;
+                goto quit;
             }
             LOGI("-> sahara_hello_resp");
             break;
         }
         case SAHARA_READ_DATA:
         {
-            sahara_read_data *pkt = (sahara_read_data *)header;
+            sahara_read_data *pkt = (sahara_common_header *)buffer;
             LOGI("<- sahara_read_data offset %u len %u", le32toh(pkt->offset), le32toh(pkt->datalen));
 
-            snprintf(flash_tool_image, sizeof(flash_tool_image), "%s", _image);
-            new_sahara_raw_data(le32toh(pkt->offset), le32toh(pkt->datalen));
-            if (fu_quectel_usb_device_send())
+            if (fu_quectel_usb_device_send(usbdev,
+                                           new_sahara_raw_data(imgfd, le32toh(pkt->offset), le32toh(pkt->datalen)),
+                                           le32toh(pkt->datalen), TIMEOUT))
             {
                 LOGI("sahara_send_cmd error");
-                return -1;
+                status = FALSE;
+                goto quit;
             }
             LOGI("-> sahara_raw_data");
             break;
@@ -204,17 +233,20 @@ gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmwa
         case SAHARA_END_IMG_TRANSFER:
         {
             LOGI("<- sahara_end_image_transfer");
-            if (sahara_tx_finish((sahara_end_img_transfer *)header))
+            if (sahara_tx_finish((sahara_end_img_transfer *)buffer))
             {
                 LOGI("target send SAHARA_END_IMG_TRANSFER with error");
-                return -1;
+                status = FALSE;
+                goto quit;
             }
 
-            new_sahara_done();
-            if (fu_quectel_usb_device_send())
+            if (fu_quectel_usb_device_send(usbdev,
+                                           new_sahara_done(),
+                                           sizeof(sahara_done), TIMEOUT))
             {
                 LOGI("sahara_send_cmd error");
-                return -1;
+                status = FALSE;
+                goto quit;
             }
             LOGI("-> sahara_done");
             break;
@@ -223,77 +255,82 @@ gboolean fu_quectel_usb_device_sahara_write(QuectelUSBDev *usbdev, QuectelFirmwa
         {
             LOGI("<- sahara_done_resp");
             LOGI("image has been successfully transfered");
-            return 0;
+            status = TRUE;
+            goto quit;
         }
         default:
             LOGI("invalid sahara command recevied");
         }
     } while (1);
 
+quit:
+    close(imgfd);
     return status;
 }
 
-gint get_file_size(int fd)
+guint get_file_size(int fd)
 {
+    struct stat statbuf;
+    fstat(fd, &statbuf);
+    return statbuf.st_size;
 }
 
-gint calc_tx_len(int remain_len, int sector_size)
-{
-}
-
-#define FH_TX_MAX (16 * 1024)
-static fu_quectel_send_raw_data(QuectelUSBDev *usbdev, gchar *img, gint sector_size)
+gboolean
+fu_quectel_send_raw_data(QuectelUSBDev *usbdev, const gchar *img, guint sector_size)
 {
     gboolean status;
     gchar buffer[FH_TX_MAX];
     int imgfd = open(img, O_RDONLY);
-    gint remain_len = get_file_size(imgfd);
+    guint remain_len = get_file_size(imgfd);
 
     do
     {
-        gint tx_size = (remain_len > FH_TX_MAX) : FH_TX_MAX : calc_tx_len(remain_len, sector_size);
-        status = fu_quectel_usb_device_send(usbdev, cmd, strlen(cmd), TIMEOUT);
+        memset(buffer, 0, array_len(buffer));
+        guint tx_size = (remain_len > FH_TX_MAX) ? FH_TX_MAX : sector_size;
+        read(imgfd, buffer, tx_size);
+        status = fu_quectel_usb_device_send(usbdev, buffer, tx_size, TIMEOUT);
+        remain_len -= tx_size;
     } while (remain_len);
     return status;
 }
 
-gboolean fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm);
+gboolean fu_quectel_usb_device_firehose_write(QuectelUSBDev *usbdev, QuectelFirmware *fm)
 {
     gchar *cmd = NULL;
     gboolean status;
 
-    for (guint i = 0; fm[i]; i++)
-    {
-        QuectelFirmware *ptr = fm[i];
-        switch (ptr->type)
-        {
-        case CMD_ERASE:
-            cmd = new_firehose_erase(ptr->data);
-            break;
-        case CMD_PROGRAM:
-            cmd = new_firehose_program(ptr->data);
-        default:
-            break;
-        }
+    // for (guint i = 0; fm[i]; i++)
+    // {
+    //     QuectelFirmware *ptr = fm[i];
+    //     switch (ptr->type)
+    //     {
+    //     case CMD_ERASE:
+    //         cmd = new_firehose_erase(ptr->data);
+    //         break;
+    //     case CMD_PROGRAM:
+    //         cmd = new_firehose_program(ptr->data);
+    //     default:
+    //         break;
+    //     }
 
-        status = fu_quectel_usb_device_send(usbdev, cmd, strlen(cmd), TIMEOUT);
-        if (!status)
-        {
-            LOGE("fail do firehose command");
-            break;
-        }
+    //     status = fu_quectel_usb_device_send(usbdev, cmd, strlen(cmd), TIMEOUT);
+    //     if (!status)
+    //     {
+    //         LOGE("fail do firehose command");
+    //         break;
+    //     }
 
-        // program command, send raw data
-        if (ptr->type == CMD_PROGRAM)
-        {
-            status = fu_quectel_send_raw_data(usbdev, ptr->img, ptr->sector_size);
-            if (!status)
-            {
-                LOGE("fail send raw data");
-                break;
-            }
-        }
-    }
+    //     // program command, send raw data
+    //     if (ptr->type == CMD_PROGRAM)
+    //     {
+    //         status = fu_quectel_send_raw_data(usbdev, ptr->img, ptr->sector_size);
+    //         if (!status)
+    //         {
+    //             LOGE("fail send raw data");
+    //             break;
+    //         }
+    //     }
+    // }
 
     return status;
 }

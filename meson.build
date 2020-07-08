@@ -1,21 +1,14 @@
-cargs = ['-DG_LOG_DOMAIN="FuPluginQuectel"']
+cargs = ['-DG_LOG_DOMAIN="FuPluginFirehose"']
 
-install_quectel = false
-if get_option('plugin_quectel')
-  install_quectel = true
-endif
-
-install_data(['quectel.quirk'],
+install_data(['firehose.quirk'],
   install_dir: join_paths(datadir, 'fwupd', 'quirks.d')
 )
 
-shared_module('fu_plugin_quectel',
+shared_module('fu_plugin_firehose',
+  fu_hash,
   sources : [
-    'fu-plugin-quectel.c',
-    'fu-quectel-device.c',
-    'fu-quectel-firmware.c',
-    'protocol/sahara_proto.c',
-    'protocol/firehose_proto.c',
+    'fu-plugin-firehose.c',
+    'fu-firehose-device.c',
   ],
   include_directories : [
     root_incdir,

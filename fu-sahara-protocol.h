@@ -161,16 +161,3 @@ typedef struct
 {
     SAHARA_COMMON_HDR;
 } sahara_reset_machine;
-
-#define SAHARA_MAX_PKT (8 * 1024)
-// default mode, SAHARA_MODE_IMAGE_TX_COMPLETE
-sahara_hello_resp *new_sahara_hello_resp(sahara_mode mode);
-uint8_t *new_sahara_raw_data(int imgfd, int _offset, int _datalen);
-sahara_done *new_sahara_done(void);
-sahara_reset *new_sahara_reset(void);
-sahara_switch_mode *new_sahara_switch_mode(sahara_mode mode);
-sahara_reset_machine *new_sahara_reset_machine(void);
-sahara_command sahara_command_type(uint8_t *data);
-const sahara_status *sahara_get_status_code(uint32_t status);
-int sahara_tx_finish(sahara_end_img_transfer *pkt);
-void sahara_dump_message(uint8_t *msg, int len);

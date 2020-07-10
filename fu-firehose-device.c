@@ -25,14 +25,16 @@
 #define FIREHOSE_EDL_PID            0x9008
 
 #define MAX_RX_SIZE                (4 * 1024)
-#define MAX_TX_SIZE                (16 * 1024)
+#define MAX_TX_SIZE                (8 * 1024)
 
 #define SAHARA_VERSION 0x02
 #define SAHARA_VERSION_COMPATIBLE 0
 
+#define FIREHOSE_TOOL_PREFIX     "prog_"
+#define FIREHOSE_XML_PREFIX      "rawprogram_"
+
 struct _FuFirehoseDevice {
 	FuUsbDevice			 parent_instance;
-	GBytes               *raw_data;
 	guint				 max_tx_size;
 	guint				 max_rx_size;
 	guint                intf_nr;
@@ -112,7 +114,7 @@ fu_firehose_device_write (FuDevice *device, const guint8 *buf, gsize buflen, GEr
 					  FIREHOSE_TRANSACTION_TIMEOUT,
 					  NULL, error);
 	if (!ret) {
-		g_prefix_error (error, "failed to do bulk transfer: ");
+		g_prefix_error (error, "failed to do bulk out transfer: ");
 		return FALSE;
 	}
 	if (actual_len != buflen) {
@@ -132,12 +134,16 @@ typedef enum {
 
 static gboolean
 fu_firehose_device_read (FuDevice *device,
-			 gchar **str,
+			 gchar **value_out,
 			 FuFirehoseDeviceReadFlags flags,
 			 GError **error)
 {
 	// FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
 	GUsbDevice *usb_device = fu_usb_device_get_dev (FU_USB_DEVICE (device));
+	g_autoptr(GPtrArray) parts = NULL;
+	g_autoptr(XbBuilder) builder = xb_builder_new ();
+	g_autoptr(XbBuilderSource) source = xb_builder_source_new ();
+	g_autoptr(XbSilo) silo = NULL;
 	guint retries = 1;
 
 	/* these commands may return INFO or take some time to complete */
@@ -147,8 +153,7 @@ fu_firehose_device_read (FuDevice *device,
 	for (guint i = 0; i < retries; i++) {
 		gboolean ret;
 		gsize actual_len = 0;
-		guint8 buf[MAX_RX_SIZE               ] = { 0x00 };
-		g_autofree gchar *             tmp = NULL;
+		guint8 buf[MAX_RX_SIZE] = { 0x00 };
 		g_autoptr(GError) error_local = NULL;
 
 		ret = g_usb_device_bulk_transfer (usb_device,
@@ -166,36 +171,69 @@ fu_firehose_device_read (FuDevice *device,
 				continue;
 			}
 			g_propagate_prefixed_error (error,
-						    g_steal_pointer (&error_local),
-						    "failed to do bulk transfer: ");
+						g_steal_pointer (&error_local),
+					    "failed to do bulk in transfer: ");
 			return FALSE;
 		}
 		fu_firehose_buffer_dump ("read", buf, actual_len);
 		if (actual_len < 4) {
 			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_INVALID_DATA,
-				     "only read %" G_GSIZE_FORMAT "bytes", actual_len);
+						G_IO_ERROR,
+						G_IO_ERROR_INVALID_DATA,
+						"only read %" G_GSIZE_FORMAT "bytes",
+						actual_len);
 			return FALSE;
 		}
 
 		/* info */
+		if (!xb_builder_source_load_bytes (source,
+					g_bytes_new(buf, actual_len),
+					XB_BUILDER_SOURCE_FLAG_NONE, error))
+			return FALSE;
 
-		/* success */
-		if (memcmp (buf, "OKAY", 4) == 0 || memcmp (buf, "DATA", 4) == 0) {
-			if (str != NULL)
-				*str = g_steal_pointer (&tmp);
+		xb_builder_import_source (builder, source);
+		silo = xb_builder_compile (builder,
+					XB_BUILDER_COMPILE_FLAG_NONE,
+					NULL,
+					error);
+		if (silo == NULL)
+			return FALSE;
+
+		LOGI ("%s", buf);
+		/* <?xml version="1.0" ?>
+		 *	<data>
+		 *	<response value="ACK" />
+		 *	</data>
+		 */
+		parts = xb_silo_query (silo, "data/response", 0, error);
+		if (parts) {
+			const gchar *value = xb_node_get_attr(
+						g_ptr_array_index (parts, 0),
+						"value");
+			if (value_out)
+				*value_out = g_strdup(value);
+			if (value && g_strcmp0(value, "ACK") == 0)
+				return TRUE;
+			if (value && g_strcmp0(value, "NAK") == 0)
+				return FALSE;
+		}
+		g_clear_error(error);
+
+		/* <?xml version="1.0" encoding="UTF-8" ?>
+			<data>
+			<log value="Hash start sector 0 num sectors 131072" />
+			</data> */
+		parts = xb_silo_query (silo, "data/log", 0, error);
+		if (parts) {
+			const gchar *value = xb_node_get_attr(
+						g_ptr_array_index (parts, 0),
+						"value");
+			/* <log ... /> */
+			if (value_out)
+				*value_out = g_strdup(value);
 			return TRUE;
 		}
-
-		/* failure */
-		if (memcmp (buf, "FAIL", 4) == 0) {
-			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_FAILED,
-				     "failed to read response: %s", tmp);
-			return FALSE;
-		}
+		g_clear_error(error);
 
 		/* unknown failure */
 		g_set_error_literal (error,
@@ -217,247 +255,261 @@ static gboolean
 fu_firehose_device_cmd (FuDevice *device, const gchar *cmd,
 			FuFirehoseDeviceReadFlags flags, GError **error)
 {
-	gsize buflen = strlen (cmd);
-	if (!fu_firehose_device_write (device, (const guint8 *) cmd, buflen, error))
+	gsize buflen = (cmd != NULL) ? strlen (cmd) : 0;
+
+	LOGI ("%s", cmd);
+	if (cmd && !fu_firehose_device_write (device, (const guint8 *) cmd, buflen, error))
 		return FALSE;
-	if (!fu_firehose_device_read (device, NULL, flags, error))
-		return FALSE;
+
+	do {
+		g_autofree gchar *value = NULL;
+		if (!fu_firehose_device_read (device, &value, flags, error))
+			return FALSE;
+
+		if (value == NULL)
+			return FALSE;
+
+		if (g_strcmp0(value, "NAK") == 0 ||
+			g_strcmp0(value, "ACK") == 0)
+			break;
+
+		if (g_str_has_prefix(value, "INFO: End of supported functions"))
+			break;
+	} while (1);
 	return TRUE;
 }
 
 static gboolean
-fu_firehose_device_power (FuDevice *device, const gchar *cmd, GError **error)
+fu_firehose_command_power (FuDevice *device, const gchar **cmd, GError **error)
 {
-	g_autofree gchar *tmp = g_strdup_printf (
+	*cmd = g_strdup(
 		"<?xml version=\"1.0\" ?><data>"
-		"<power value=\"%s\" /></data>", cmd);
-	return fu_firehose_device_cmd (device, tmp,
-				       FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
-				       error);
+		"<power value=\"reset\" /></data>");
+	return TRUE;
 }
 
 static gboolean
-fu_firehose_device_configure (FuDevice *device, const firehose_configure *config, GError **error)
+fu_firehose_command_erase (XbNode *part, gchar **cmd, GError **error)
 {
-	g_autofree gchar *tmp = NULL;
-	
-	tmp = g_strdup_printf (
+	const gchar *pages_per_block = xb_node_get_attr(part, "PAGES_PER_BLOCK");
+	const gchar *sector_size_in_bytes = xb_node_get_attr(part, "SECTOR_SIZE_IN_BYTES");
+	const gchar *num_partition_sectors = xb_node_get_attr(part, "num_partition_sectors");
+	const gchar *physical_partition_number = xb_node_get_attr(part, "physical_partition_number");
+	const gchar *start_sector = xb_node_get_attr(part, "start_sector");
+	const gchar *last_sector = xb_node_get_attr(part, "last_sector");
+	guint64 last_sector_num;
+
+	g_return_val_if_fail (pages_per_block != NULL, FALSE);
+	g_return_val_if_fail (sector_size_in_bytes != NULL, FALSE);
+	g_return_val_if_fail (num_partition_sectors != NULL, FALSE);
+	g_return_val_if_fail (physical_partition_number != NULL, FALSE);
+	g_return_val_if_fail (start_sector != NULL, FALSE);
+
+	if (!last_sector)
+		last_sector_num = g_ascii_strtoull(start_sector, NULL, 0) + 
+						  g_ascii_strtoull(num_partition_sectors, NULL, 0) - 1;
+	else
+		last_sector_num = g_ascii_strtoull(last_sector, NULL, 0);
+
+	*cmd = g_strdup_printf (
 		"<?xml version=\"1.0\" ?><data>"
-        "<configure memory=\"%s\" MaxPayloadSizeFromTargetInBytes=\"%d\" "
-        "AlwaysValidate=\"%d\" MaxDigestTableSizeInBytes=\"%d\" MaxPayloadSizeToTargetInBytes=\"%d\" "
+		"<erase PAGES_PER_BLOCK=\"%s\" SECTOR_SIZE_IN_BYTES=\"%s\" last_sector=\"%lu\" "
+		"num_partition_sectors=\"%s\" physical_partition_number=\"%s\" start_sector=\"%s\"/>"
+		"</data>",
+		pages_per_block,
+		sector_size_in_bytes,
+		last_sector_num,
+		num_partition_sectors,
+		physical_partition_number,
+		start_sector);
+	return TRUE;
+}
+
+/* fixup: the should should be the multiply of sector_size, append pad */
+static guint
+_fu_firehose_fixup_num_sectors(guint filesize, guint sector_size)
+{
+	guint num_sectors = filesize / sector_size;
+	if (filesize % sector_size)
+		num_sectors++;
+	return num_sectors;
+}
+
+static gboolean
+fu_firehose_command_program (XbNode *part, gchar **cmd, gsize filesize, GError **error)
+{
+	const gchar *pages_per_block = xb_node_get_attr(part, "PAGES_PER_BLOCK");
+	const gchar *sector_size_in_bytes = xb_node_get_attr(part, "SECTOR_SIZE_IN_BYTES");
+	const gchar *num_partition_sectors = xb_node_get_attr(part, "num_partition_sectors");
+	const gchar *physical_partition_number = xb_node_get_attr(part, "physical_partition_number");
+	const gchar *start_sector = xb_node_get_attr(part, "start_sector");
+	const gchar *last_sector = xb_node_get_attr(part, "last_sector");
+	guint sector_num;
+	gsize sector_size;
+	guint64 last_sector_num;
+
+	g_return_val_if_fail (pages_per_block != NULL, FALSE);
+	g_return_val_if_fail (sector_size_in_bytes != NULL, FALSE);
+	g_return_val_if_fail (num_partition_sectors != NULL, FALSE);
+	g_return_val_if_fail (physical_partition_number != NULL, FALSE);
+	g_return_val_if_fail (start_sector != NULL, FALSE);
+
+	sector_num = g_ascii_strtoull(num_partition_sectors, NULL, 0);
+	sector_size = g_ascii_strtoull(sector_size_in_bytes, NULL, 0);
+
+	/* fix up command */
+	if (filesize)
+		sector_num = _fu_firehose_fixup_num_sectors(filesize,
+						sector_size);
+
+	if (!last_sector)
+		last_sector_num = g_ascii_strtoull(start_sector, NULL, 0) + 
+						sector_num;
+	else
+		last_sector_num = g_ascii_strtoull(last_sector, NULL, 0);
+
+	*cmd = g_strdup_printf (
+		"<?xml version=\"1.0\" ?><data>"
+		"<program PAGES_PER_BLOCK=\"%s\" SECTOR_SIZE_IN_BYTES=\"%s\" last_sector=\"%lu\" "
+		"num_partition_sectors=\"%u\" physical_partition_number=\"%s\" start_sector=\"%s\"/>"
+		"</data>",
+		pages_per_block,
+		sector_size_in_bytes,
+		last_sector_num,
+		sector_num,
+		physical_partition_number,
+		start_sector);
+	return TRUE;
+}
+
+static void
+fu_firehose_command_configure (FuDevice *device, gchar **cmd, GError **error)
+{
+	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
+	
+	if (!cmd) {
+		g_prefix_error (error, "invalid argument, expect not NULL");
+		return;
+	}
+
+	*cmd = g_strdup_printf (
+		"<?xml version=\"1.0\" ?><data>"
+        "<configure MemoryName=\"%s\" MaxPayloadSizeFromTargetInBytes=\"%u\" "
+        "AlwaysValidate=\"0\" MaxDigestTableSizeInBytes=\"2048\" MaxPayloadSizeToTargetInBytes=\"%u\" "
         "ZlpAwareHost=\"%d\" SkipStorageInit=\"%d\" />"
         "</data>",
-        config->MemoryName,
-        config->MaxPayloadSizeFromTargetInBytes,
-        config->AlwaysValidate,
-        config->MaxDigestTableSizeInBytes,
-        config->MaxPayloadSizeToTargetInBytes,
-        config->ZlpAwareHost,
-        config->SkipStorageInit);
-	return fu_firehose_device_cmd (device, tmp,
-				       FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
-				       error);
+        "nand", self->max_rx_size, self->max_tx_size, 0, 0); // only sdx20 support ZLP
 }
 
 static gboolean
-fu_firehose_device_erase (FuDevice *device, const firehose_erase *erase, GError **error)
+_fu_firehose_get_absolute_path(XbNode *part, gchar **filename)
 {
-	g_autofree gchar *tmp = g_strdup_printf (
-        "<?xml version=\"1.0\" ?><data>"
-        "<erase pages_per_block=\"%d\" sector_size_in_bytes=\"%d\" label=\"%s\" last_sector=\"%d\" "
-		"num_partition_sectors=\"%d\" physical_partition_number=\"%d\" start_sector=\"%d\"/>"
-        "</data>",
-        erase->pages_per_block,
-        erase->sector_size_in_bytes,
-        erase->label,
-        erase->last_sector,
-        erase->num_partition_sectors,
-        erase->physical_partition_number,
-        erase->start_sector);
-	return fu_firehose_device_cmd (device, tmp,
-				       FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
-				       error);
-}
-
-static gboolean
-fu_firehose_device_program (FuDevice *device, firehose_program *program, GBytes *fw, GError **error)
-{
-	g_autoptr(GPtrArray) chunks = NULL;
-	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
-	g_autofree gchar *tmp = g_strdup_printf (
-        "<?xml version=\"1.0\" ?><data>"
-        "<program pages_per_block=\"%d\" sector_size_in_bytes=\"%d\" filename=\"%s\" label=\"%s\" "
-        "last_sector=\"%d\" num_partition_sectors=\"%d\" physical_partition_number=\"%d\" start_sector=\"%d\"/>"
-        "</data>",
-        program->pages_per_block,
-        program->sector_size_in_bytes,
-        program->filename,
-        program->label,
-        program->last_sector,
-        program->num_partition_sectors,
-        program->physical_partition_number,
-        program->start_sector);
-
-	/* tell the client the size of data to expect */
-	if (!fu_firehose_device_cmd (device, tmp,
-				     FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
-				     error))
+	gchar *fn = xb_node_get_attr(part, "filename");
+	
+	/* NULL or "" */
+	if (!fn || strlen(fn) == 0)
 		return FALSE;
 
+	fn = g_strstrip(fn);
+	if (rindex (fn, '\\'))
+		*filename = g_strdup(rindex(fn, '\\') + 1);
+	else
+		*filename = g_strdup(fn);
+	return TRUE;
+}
+
+static gboolean
+fu_firehose_device_download (FuDevice *device,
+					GBytes *fw,
+					gsize totalsz,
+					GError **error)
+{
+	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
+	gsize sz = g_bytes_get_size (fw);
+	g_autoptr(GPtrArray) chunks = NULL;
+	gsize padlen = totalsz - sz;
+	g_autofree guint8 *tmp = NULL;
+	g_autofree gchar *value = NULL;
+
 	/* send the data in chunks */
-	fu_device_set_status (device, FWUPD_STATUS_DEVICE_WRITE);
-	
 	chunks = fu_chunk_array_new_from_bytes (fw,
 						0x00,	/* start addr */
 						0x00,	/* page_sz */
 						self->max_tx_size);
 	for (guint i = 0; i < chunks->len; i++) {
 		FuChunk *chk = g_ptr_array_index (chunks, i);
-		if (!fu_firehose_device_write (device, chk->data, chk->data_sz, error))
+		guint8 *data = chk->data;
+		gsize datalen = chk->data_sz;
+
+		if (i == chunks->len - 1 && padlen) {
+			tmp = g_malloc0(chk->data_sz + padlen);
+			memcpy (tmp, chk->data, chk->data_sz);
+			data = tmp;
+		    datalen = chk->data_sz + padlen;
+		}
+
+	LOGI("sending raw data %d/%d", chk->data_sz, totalsz);
+		if (!fu_firehose_device_write (device, data, datalen, error))
 			return FALSE;
 		fu_device_set_progress_full (device, (gsize) i, (gsize) chunks->len * 2);
 	}
 
-	if (!fu_firehose_device_read (device, NULL,
-				      FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL, error))
+	if (!fu_firehose_device_cmd(device, NULL,
+			FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
+			error))
 		return FALSE;
+
 	return TRUE;
 }
 
 static gboolean
-fu_fastboot_device_write_quectel_part (FuDevice *device,
+fu_firehose_device_write_quectel_part (FuDevice *device,
 					FuArchive *archive,
 					XbNode *part,
 					GError **error)
 {
-	const gchar *op = xb_node_get_attr (part, "operation");
-
-	/* oem */
-	if (g_strcmp0 (op, "oem") == 0) {
-		g_set_error_literal (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_NOT_SUPPORTED,
-				     "OEM commands are not supported");
-		return FALSE;
-	}
-
-	/* getvar */
-	if (g_strcmp0 (op, "getvar") == 0) {
-		const gchar *var = xb_node_get_attr (part, "var");
-		g_autofree gchar *tmp = NULL;
-
-		/* check required args */
-		if (var == NULL) {
-			tmp = xb_node_export (part, XB_NODE_EXPORT_FLAG_NONE, NULL);
-			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_INVALID_DATA,
-				     "required var for part: %s", tmp);
-			return FALSE;
-		}
-
-		/* just has to be non-empty */
-		if (!fu_fastboot_device_getvar (device, var, &tmp, error))
-			return FALSE;
-		if (tmp == NULL || tmp[0] == '\0') {
-			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_INVALID_DATA,
-				     "failed to getvar %s", var);
-			return FALSE;
-		}
-		return TRUE;
-	}
+	const gchar *op = xb_node_get_element (part); //erase, program
+	g_autofree gchar *tmp = NULL;
 
 	/* erase */
 	if (g_strcmp0 (op, "erase") == 0) {
-		const gchar *partition = xb_node_get_attr (part, "partition");
-		g_autofree gchar *cmd = g_strdup_printf ("erase:%s", partition);
-
-		/* check required args */
-		if (partition == NULL) {
-			g_autofree gchar *tmp = NULL;
-			tmp = xb_node_export (part, XB_NODE_EXPORT_FLAG_NONE, NULL);
-			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_INVALID_DATA,
-				     "required partition for part: %s", tmp);
+		if (!fu_firehose_command_erase(part, &tmp, error))
 			return FALSE;
-		}
-
-		/* erase the partition */
-		return fu_fastboot_device_cmd (device, cmd,
-					       FU_FASTBOOT_DEVICE_READ_FLAG_NONE,
-					       error);
+		return fu_firehose_device_cmd (device, tmp,
+						FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
+						error);
 	}
 
 	/* flash */
-	if (g_strcmp0 (op, "flash") == 0) {
-		GBytes *data;
-		const gchar *filename = xb_node_get_attr (part, "filename");
-		const gchar *partition = xb_node_get_attr (part, "partition");
-		struct {
-			GChecksumType kind;
-			const gchar *str;
-		} csum_kinds[] = {
-			{ G_CHECKSUM_MD5,	"MD5" },
-			{ G_CHECKSUM_SHA1,	"SHA1" },
-			{ 0, NULL }
-		};
-
-		/* check required args */
-		if (partition == NULL || filename == NULL) {
-			g_autofree gchar *tmp = NULL;
-			tmp = xb_node_export (part, XB_NODE_EXPORT_FLAG_NONE, NULL);
-			g_set_error (error,
-				     G_IO_ERROR,
-				     G_IO_ERROR_INVALID_DATA,
-				     "required partition and filename: %s", tmp);
-			return FALSE;
-		}
+	if (g_strcmp0 (op, "program") == 0) {
+		g_autoptr(GPtrArray) chunks = NULL;
+		g_autofree gchar *fn = NULL;
+		GBytes *fw = NULL;
+		gsize filesize = 0;
+		guint sector_size = xb_node_get_attr_as_uint(part, "SECTOR_SIZE_IN_BYTES");
+		guint num_sectors = xb_node_get_attr_as_uint(part, "num_partition_sectors");
 
 		/* find filename */
-		data = fu_archive_lookup_by_fn (archive, filename, error);
-		if (data == NULL)
+		if (!_fu_firehose_get_absolute_path(part, &fn))
+			return TRUE;
+
+		fw = fu_archive_lookup_by_fn (archive, fn, error);
+		if (fw == NULL)
+			return FALSE;
+		filesize = g_bytes_get_size (fw);
+
+		if (!fu_firehose_command_program(part, &tmp, filesize, error))
 			return FALSE;
 
-		/* checksum is optional */
-		for (guint i = 0; csum_kinds[i].str != NULL; i++) {
-			const gchar *csum;
-			g_autofree gchar *csum_actual = NULL;
-
-			/* not provided */
-			csum = xb_node_get_attr (part, csum_kinds[i].str);
-			if (csum == NULL)
-				continue;
-
-			/* check is valid */
-			csum_actual = g_compute_checksum_for_bytes (csum_kinds[i].kind, data);
-			if (g_strcmp0 (csum, csum_actual) != 0) {
-				g_set_error (error,
-					     G_IO_ERROR,
-					     G_IO_ERROR_INVALID_DATA,
-					     "%s invalid, expected %s, got %s",
-					     filename, csum, csum_actual);
-				return FALSE;
-			}
-		}
-
-		/* flash the partition */
-		if (!fu_fastboot_device_download (device, data, error))
+		if (!fu_firehose_device_cmd (device, tmp,
+						FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
+						error))
 			return FALSE;
-		return fu_fastboot_device_flash (device, partition, error);
-	}
 
-	/* dumb operation that doesn't expect a response */
-	if (g_strcmp0 (op, "boot") == 0 ||
-	    g_strcmp0 (op, "continue") == 0 ||
-	    g_strcmp0 (op, "reboot") == 0 ||
-	    g_strcmp0 (op, "reboot-bootloader") == 0 ||
-	    g_strcmp0 (op, "powerdown") == 0) {
-		return fu_fastboot_device_cmd (device, op,
-					       FU_FASTBOOT_DEVICE_READ_FLAG_NONE,
-					       error);
+		if (filesize)
+			num_sectors = _fu_firehose_fixup_num_sectors(filesize, sector_size);
+		return fu_firehose_device_download(device, fw, 
+				num_sectors * sector_size, error);
 	}
 
 	/* unknown */
@@ -472,30 +524,71 @@ static gboolean
 fu_firehose_device_write_quectel (FuDevice *device, FuArchive* archive, GError **error)
 {
 	GBytes *data;
-	g_autoptr(GPtrArray) parts = NULL;
+	g_autoptr(GPtrArray) erase_parts = NULL;
+	g_autoptr(GPtrArray) program_parts = NULL;
 	g_autoptr(XbBuilder) builder = xb_builder_new ();
 	g_autoptr(XbBuilderSource) source = xb_builder_source_new ();
 	g_autoptr(XbSilo) silo = NULL;
+	g_autofree gchar *tmp = NULL;
 
 	/* load the manifest of operations */
-	data = fu_archive_lookup_by_fn_prefix (archive, "rawprogram", error);
+	data = fu_archive_lookup_by_fn_prefix (archive, FIREHOSE_XML_PREFIX, error);
 	if (data == NULL)
 		return FALSE;
 	if (!xb_builder_source_load_bytes (source, data,
 					   XB_BUILDER_SOURCE_FLAG_NONE, error))
 		return FALSE;
+
 	xb_builder_import_source (builder, source);
 	silo = xb_builder_compile (builder, XB_BUILDER_COMPILE_FLAG_NONE, NULL, error);
 	if (silo == NULL)
 		return FALSE;
 
-	/* get all the operation parts */
-	parts = xb_silo_query (silo, "data", 0, error);
-	if (parts == NULL)
+	/* when the prog_nand*.mbn runs, it will report some info
+	 * in format of <log ..>
+	 * including supportted functions
+	 * 
+	 * read them out or bulk transfer will be blocked
+	 */
+	if (!fu_firehose_device_cmd (device, NULL,
+				FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
+				error))
 		return FALSE;
-	for (guint i = 0; i < parts->len; i++) {
-		XbNode *part = g_ptr_array_index (parts, i);
-		if (!fu_fastboot_device_write_quectel_part (device,
+
+LOGI ("======try send configure");
+
+	/* get all the data erase parts */
+	fu_firehose_command_configure(device, &tmp, error);
+	if (!fu_firehose_device_cmd (device, tmp,
+					FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL,
+					error))
+		return FALSE;
+		
+LOGI ("======try erase/program");
+
+	/* get all the data erase parts */
+	erase_parts = xb_silo_query (silo, "data/erase", 0, error);
+	if (erase_parts == NULL)
+		return FALSE;
+
+	for (guint i = 0; i < erase_parts->len; i++) {
+		XbNode *part = g_ptr_array_index (erase_parts, i);
+		if (!fu_firehose_device_write_quectel_part (device,
+							     archive,
+							     part,
+							     error))
+			return FALSE;
+	}
+
+	/* get all the data program parts */
+	fu_device_set_status (device, FWUPD_STATUS_DEVICE_WRITE);
+	program_parts = xb_silo_query (silo, "data/program", 0, error);
+	if (program_parts == NULL)
+		return FALSE;
+
+	for (guint i = 0; i < program_parts->len; i++) {
+		XbNode *part = g_ptr_array_index (program_parts, i);
+		if (!fu_firehose_device_write_quectel_part (device,
 							     archive,
 							     part,
 							     error))
@@ -507,12 +600,12 @@ fu_firehose_device_write_quectel (FuDevice *device, FuArchive* archive, GError *
 }
 
 static gboolean
-fu_firehose_device_sahara_read (FuDevice *device,
+fu_sahara_read (FuDevice *device,
 			 guint8 *resp,
 			 FuFirehoseDeviceReadFlags flags,
 			 GError **error)
 {
-	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
+	// FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
 	GUsbDevice *usb_device = fu_usb_device_get_dev (FU_USB_DEVICE (device));
 	guint retries = 1;
 
@@ -542,7 +635,7 @@ fu_firehose_device_sahara_read (FuDevice *device,
 			}
 			g_propagate_prefixed_error (error,
 						    g_steal_pointer (&error_local),
-						    "failed to do bulk transfer: ");
+						    "failed to do bulk in transfer: ");
 			return FALSE;
 		}
 		fu_firehose_buffer_dump ("read", buf, actual_len);
@@ -569,11 +662,11 @@ fu_firehose_device_sahara_read (FuDevice *device,
 }
 
 static gboolean
-fu_firehose_device_sahara_hello_resp (FuDevice *device, sahara_mode mode, GError **error)
+fu_sahara_hello_resp (FuDevice *device, sahara_mode mode, GError **error)
 {
 	gsize datalen = sizeof(sahara_hello_resp);
 	g_autofree guint8 *data = g_malloc0(datalen);
-	sahara_hello_resp *pkt = data;
+	sahara_hello_resp *pkt = (sahara_hello_resp *)data;
 
 	pkt->command = GINT32_TO_LE(SAHARA_HELLO_RESP);
 	pkt->length = GINT32_TO_LE(sizeof(sahara_hello_resp));
@@ -586,11 +679,11 @@ fu_firehose_device_sahara_hello_resp (FuDevice *device, sahara_mode mode, GError
 }
 
 static gboolean
-fu_firehose_device_sahara_done (FuDevice *device, GError **error)
+fu_sahara_done (FuDevice *device, GError **error)
 {
 	gsize datalen = sizeof(sahara_done);
 	g_autofree guint8 *data = g_malloc0(datalen);
-	sahara_done *pkt = data;
+	sahara_done *pkt = (sahara_done *)data;
 
 	pkt->command = GINT32_TO_LE(SAHARA_DONE);
 	pkt->length = GINT32_TO_LE(sizeof(sahara_done));
@@ -599,20 +692,19 @@ fu_firehose_device_sahara_done (FuDevice *device, GError **error)
 }
 
 static gboolean
-fu_firehose_device_sahara_raw_data (FuDevice *device, gsize offset, gsize datalen, GError **error)
+fu_sahara_raw_data (FuDevice *device, GBytes *data, gsize offset, gsize datalen, GError **error)
 {
 	gsize size;
-	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE(device);
-	const guint8 *data = g_bytes_get_data(self->raw_data, &size);
+	const guint8 *raw_data = g_bytes_get_data(data, &size);
 	
-	data += offset;
-	return fu_firehose_device_write(device, data, datalen, error);
+	raw_data += offset;
+	return fu_firehose_device_write(device, raw_data, datalen, error);
 }
 
 static gboolean
 fu_firehose_device_setup (FuDevice *device, GError **error)
 {
-	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
+	// FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
 	g_autofree gchar *product = NULL;
 	g_autofree gchar *serialno = NULL;
 	g_autofree gchar *version = NULL;
@@ -620,7 +712,7 @@ fu_firehose_device_setup (FuDevice *device, GError **error)
 	g_autofree gchar *version_bootloader = NULL;
 
 	/* product */
-	fu_device_set_name (device, "QHSUSB_BULK");
+	// fu_device_set_name (device, "QHSUSB_BULK");
 
 	/* boot-loader */
 	fu_device_set_version_bootloader (device, "2.0.0");
@@ -641,74 +733,66 @@ fu_firehose_device_setup (FuDevice *device, GError **error)
 static gboolean
 fu_firehose_device_write_sahara (FuDevice *device, FuArchive* archive, GError **error)
 {
-	FuFirehoseDevice *self = FU_FIREHOSE_DEVICE (device);
 	g_autofree guint8 *resp = g_malloc0 (MAX_RX_SIZE);
+	GBytes *data = NULL;
 
 	if (resp == NULL)
 		return FALSE;
 
 	/* load the manifest of operations */
-	self->raw_data = fu_archive_lookup_by_fn_prefix (archive, "prog_nand_firehose", error);
-	if (self->raw_data == NULL)
+	data = fu_archive_lookup_by_fn_prefix (archive, FIREHOSE_TOOL_PREFIX, error);
+	if (data == NULL)
 		return FALSE;
 
 	do {
+		sahara_common_header *hdr = (sahara_common_header*)resp;
 		memset(resp, 0, MAX_RX_SIZE);
-		if (!fu_firehose_device_sahara_read (device, resp, FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL, error))
+		if (!fu_sahara_read (device, resp, FU_FIREHOSE_DEVICE_READ_FLAG_STATUS_POLL, error))
 			return FALSE;
 
-		sahara_common_header *hdr = (sahara_common_header*)resp;
         switch (GUINT32_FROM_LE(hdr->command)) {
         case SAHARA_HELLO:
 		{
-			LOGI ("SAHARA_HELLO");
-            if (!fu_firehose_device_sahara_hello_resp(device, SAHARA_MODE_IMAGE_TX_COMPLETE, error)) {
-				LOGI ("write sahara_hello_resp fail");
+            if (!fu_sahara_hello_resp(device, SAHARA_MODE_IMAGE_TX_COMPLETE, error)) {
+				g_prefix_error (error, "write sahara_hello_resp fail");
 				return FALSE;
 			}
             break;
         }
         case SAHARA_READ_DATA:
         {
-			LOGI ("SAHARA_READ_DATA");
             sahara_read_data *pkt = (sahara_read_data *)resp;
-            if (!fu_firehose_device_sahara_raw_data(device, GUINT32_FROM_LE(pkt->offset),
+            if (!fu_sahara_raw_data(device, data, GUINT32_FROM_LE(pkt->offset),
 					GUINT32_FROM_LE(pkt->datalen), error)) {
-				LOGI ("write sahara_raw_data fail");
+				g_prefix_error (error, "write sahara_raw_data fail");
 				return FALSE;
             }
             break;
         }
         case SAHARA_END_IMG_TRANSFER:
         {
-			LOGI ("SAHARA_END_IMG_TRANSFER");
 			sahara_end_img_transfer *pkt = (sahara_end_img_transfer *)resp;
-			if (self->raw_data)
-				g_free(self->raw_data);
-
-			self->raw_data = NULL;
             if (pkt->status) {
-				LOGI ("write sahara_end_img_tx fail %u", GUINT32_FROM_LE(pkt->status));
+				g_prefix_error (error, "write sahara_end_img_tx fail %u", GUINT32_FROM_LE(pkt->status));
                 return FALSE;
             }
 
-            if (!fu_firehose_device_sahara_done(device, error)) {
-				LOGI ("write sahara_done fail");
+            if (!fu_sahara_done(device, error)) {
+				g_prefix_error (error, "write sahara_done fail");
                 return FALSE;
             }
             break;
         }
         case SAHARA_DONE_RESP:
-			LOGI ("sahara transfer finished");
-			break;
+			/* success */
+			g_debug ("sahara transfer finished");
+			LOGI ("sahara transfer success");
+			return TRUE;
         default:
-			LOGI ("read unknow sahara header");
+			g_prefix_error (error, "read unknow sahara header");
 			return FALSE;
         }
     } while (1);
-
-	/* success */
-	return TRUE;
 }
 
 static gboolean
@@ -730,13 +814,17 @@ fu_firehose_device_write_firmware (FuDevice *device,
 	if (archive == NULL)
 		return FALSE;
 
-	/* load the prog_nand*.mbn of operations */
-	if (fu_archive_lookup_by_fn_prefix (archive, "prog_nand_firehose", NULL) != NULL)
-		return fu_firehose_device_write_sahara (device, archive, error);
-	
+	// /* load the prog_nand*.mbn of operations */
+	if (fu_archive_lookup_by_fn_prefix (archive, FIREHOSE_TOOL_PREFIX, NULL) != NULL) {
+		if (!fu_firehose_device_write_sahara (device, archive, error))
+			return FALSE;
+	}
+
+	sleep(3);	
 	/* load the manifest of operations */
-	if (fu_archive_lookup_by_fn_prefix (archive, "rawprogram_nand", NULL) != NULL) {
-		return fu_firehose_device_write_quectel (device, archive, error);
+	if (fu_archive_lookup_by_fn_prefix (archive, FIREHOSE_XML_PREFIX, NULL) != NULL) {
+		if (!fu_firehose_device_write_quectel (device, archive, error))
+			return FALSE;
 	}
 
 	/* not supported */
@@ -785,11 +873,17 @@ fu_firehose_device_set_quirk_kv (FuDevice *device,
 static gboolean
 fu_firehose_device_attach (FuDevice *device, GError **error)
 {
+	g_autofree gchar *cmd = NULL;
 	fu_device_set_status (device, FWUPD_STATUS_DEVICE_RESTART);
-	if (!fu_firehose_device_power (device, "reset", error))
-		return FALSE;
-
-	fu_device_add_flag (device, FWUPD_DEVICE_FLAG_WAIT_FOR_REPLUG);
+	fu_firehose_command_power (device, &cmd, error))
+	if (!fu_firehose_device_cmd (device, cmd,
+				       FU_FIREHOSE_DEVICE_READ_FLAG_NONE,
+				       error)) {
+		fu_device_add_flag (device, FWUPD_DEVICE_FLAG_WAIT_FOR_REPLUG);
+	}
+	else {
+		fu_device_add_flag (device, FWUPD_DEVICE_FLAG_WAIT_FOR_REPLUG);
+	}
 	return TRUE;
 }
 
@@ -800,7 +894,6 @@ fu_firehose_device_init (FuFirehoseDevice *self)
 	self->max_tx_size = MAX_TX_SIZE;
 	self->max_rx_size = MAX_RX_SIZE;
 	self->intf_nr = 0;
-	self->raw_data = NULL;
 	fu_device_set_protocol (FU_DEVICE (self), "com.qualcomm.firehose");
 	fu_device_add_flag (FU_DEVICE (self), FWUPD_DEVICE_FLAG_UPDATABLE);
 	fu_device_add_flag (FU_DEVICE (self), FWUPD_DEVICE_FLAG_IS_BOOTLOADER);

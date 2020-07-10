@@ -20,7 +20,7 @@
 	</description>
 	<provides>
 		<firmware type="flashed">
-			587bf468-6859-5522-93a7-6cce552a0aa3
+			9d5ddb63-31c7-55cc-a11e-67b5fd871113
 		</firmware>
 	</provides>
 	<url type="homepage">
@@ -37,7 +37,7 @@
 	</developer_name>
 	<releases>
 		<release urgency="high" version="EC20CEFA01V02" date="2017-02-09" install_duration="120">
-			<checksum filename="rawprogram_nand_p4K_b256K_update.xml" target="content" />
+			<checksum filename="EM12GPAR01A20M4G.zip" target="content" />
 			<description>
 				<p>
 					This stable release fixes the following bugs:

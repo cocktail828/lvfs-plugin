@@ -12,4 +12,4 @@
 G_DECLARE_FINAL_TYPE (FuFirehoseDevice, fu_firehose_device, FU, FIREHOSE_DEVICE, FuUsbDevice)
 
 #include <syslog.h>
-#define LOGI(fmt, args...) syslog(LOG_USER | LOG_INFO,    "quectel %s_%d " fmt, __func__, __LINE__, ##args)
+#define LOGI(fmt, args...) syslog(LOG_USER | LOG_INFO,    "===============quectel %s_%d " fmt, __func__, __LINE__, ##args)

@@ -1,4 +1,4 @@
-Fastboot Support
+Firehose Support
 ================
 
 Introduction

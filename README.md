@@ -4,7 +4,7 @@ Firehose Support
 Introduction
 ------------
 
-This plugin is used to update hardware that uses the fastboot protocol.
+This plugin is used to update hardware that uses the firehose protocol.
 
 Firmware Format
 ---------------
